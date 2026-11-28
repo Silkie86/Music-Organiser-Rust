@@ -1,6 +1,6 @@
 [package]
 name = "mo-plugin"
-description = "The test CLAP plugin: a small DAWmate panel inside a DAW (Bitwig first). It opens a Slint panel in the window the DAW lends it, lists sounds from the app's sound library, plays one through the track, and lists every CLAP extension the DAW offers. It reads the app's files; the one thing it writes in them is a curve saved as new from its curve editor."
+description = "The test CLAP plugin: a small DAWmate panel inside a DAW (Bitwig first). It opens a Slint panel in the window the DAW lends it, lists sounds from the app's sound library, plays one through the track, and lists every CLAP extension the DAW offers. It reads the app's files; the one thing it writes in them is a curve saved as new from its curve editor. Like the app, it writes copies of sounds in the export folder (a trimmed sound dragged out, an edit from its Edit strip)."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -48,8 +48,9 @@ slint = { version = "1.18", default-features = false, features = [
     "renderer-femtovg-wgpu",
     "unstable-wgpu-30",
 ] }
-# Only to switch on Slint's reading of the pictures in its own widgets (the list's scroll bar): Slint's window libraries
-# switch it on themselves, and the plugin uses none of them. The same version as `slint` in Cargo.lock: update both.
+# To switch on Slint's reading of the pictures in its own widgets (the list's scroll bar): Slint's window libraries
+# switch it on themselves, and the plugin uses none of them. And to ask whether a menu is open, as those libraries do
+# (`window.rs`, `menu_open`). The same version as `slint` in Cargo.lock: update both.
 i-slint-core = { version = "=1.18.1", default-features = false, features = ["image-decoders", "svg"] }
 # Hands sounds to the audio thread and back without waiting or making memory there.
 rtrb = "0.3"

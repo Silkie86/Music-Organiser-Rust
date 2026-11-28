@@ -12,6 +12,7 @@
 
 mod curve_bench;
 mod curves_tab;
+mod edit_strip;
 mod midi_tab;
 mod presets_tab;
 
@@ -32,8 +33,9 @@ use baseview::{
     Event, EventStatus, HandlerError, MouseButton, MouseEvent, ScrollDelta, TimerHandle, WindowContext, WindowEvent,
     WindowHandler, WindowSettings, WindowSize,
 };
-use keyboard_types::{Key, KeyState, Modifiers, NamedKey};
+use keyboard_types::{Code, Key, KeyState, KeyboardEvent, Modifiers, NamedKey};
 use mo_app::backup::thousands;
+use mo_app::edit_strip::Picked;
 use mo_app::filters::{Filter, Shown as Choice};
 use mo_app::galaxy_grid::Grid;
 use mo_app::galaxy_view::{Hold, Moved, View};
@@ -46,6 +48,7 @@ use slint::{ComponentHandle, LogicalPosition, Model, ModelNotify, ModelRc, Model
 use std::cell::{Cell, RefCell};
 use std::num::NonZeroU32;
 use std::panic::AssertUnwindSafe;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -57,8 +60,8 @@ use std::time::{Duration, Instant};
 pub const WIDTH: f64 = 1280.0;
 pub const HEIGHT: f64 = 800.0;
 /// The smallest the window can be dragged: the filter column, and beside it the Sounds tab's widest row of buttons
-/// (the playing row, with Match tempo and In Bitwig's Sampler showing), with the folder tree's tab between them.
-pub const LEAST_WIDTH: f64 = 764.0;
+/// (the playing row, with Match tempo, Edit and In Bitwig's Sampler showing), with the folder tree's tab between them.
+pub const LEAST_WIDTH: f64 = 844.0;
 pub const LEAST_HEIGHT: f64 = 560.0;
 /// The biggest: more than any screen today, so a DAW that asks for a silly size doesn't get a picture that big.
 pub const MOST_WIDTH: f64 = 7680.0;
@@ -249,6 +252,8 @@ enum Carried {
     Curve(usize),
     /// The last take Record saved.
     Recording,
+    /// What the Edit strip's drag handle carries: the edit as a copy, or the part picked.
+    Edit,
 }
 
 /// A drag out that has ended: its file, when it started and how it ended.
@@ -280,6 +285,7 @@ fn take<T>(slot: &Mutex<Option<T>>) -> Option<T> {
 }
 
 /// The list's lines, made only for the rows shown (the list can hold half a million sounds).
+#[derive(Default)]
 struct Lines {
     library: RefCell<Option<Arc<Library>>>,
     /// A library read again, to show once its list is worked out (until then the lines are the old one's).
@@ -339,7 +345,6 @@ impl Lines {
         }
     }
 
-    /// The id of the sound on `row`.
     /// Whether the library knows the sound on `row` as a loop (Trim silence drags a loop as it is).
     fn is_loop(&self, row: usize) -> bool {
         let library = self.library.borrow();
@@ -347,18 +352,48 @@ impl Lines {
         library.as_ref().and_then(|l| l.list.sound(at)).is_some_and(|s| s.analysis.as_ref().is_some_and(|a| a.is_loop))
     }
 
+    /// The id of the sound on `row`.
     fn sound(&self, row: usize) -> Option<i64> {
         let library = self.library.borrow();
         let at = *self.shown.borrow().get(row)?;
         library.as_ref()?.list.sound(at).map(|s| s.id)
     }
 
-    /// The row the sound with id `sound` is on, if the list shows it (a look through the list: only when a list is
-    /// worked out again).
-    fn row_of(&self, sound: i64) -> Option<usize> {
+    /// The place in the whole list of the sound on `row`.
+    fn at(&self, row: usize) -> Option<usize> {
+        self.shown.borrow().get(row).copied()
+    }
+
+    /// The sound on `row` as the Edit strip takes it, with its place in the whole list and whether the library knows
+    /// it as a loop.
+    fn picked(&self, row: usize) -> Option<(Picked, usize, bool)> {
+        let library = self.library.borrow();
+        let at = *self.shown.borrow().get(row)?;
+        let s = library.as_ref()?.list.sound(at)?;
+        let picked = Picked {
+            id: s.id,
+            path: PathBuf::from(&s.path),
+            seconds: s.analysis.as_ref().map_or(0.0, |a| a.seconds),
+            name: s.name().to_owned(),
+            colour: mo_app::sounds::type_colour(&s.sound_type),
+            bpm: s.analysis.as_ref().and_then(|a| a.bpm).filter(|b| *b > 0.0),
+        };
+        Some((picked, at, s.analysis.as_ref().is_some_and(|a| a.is_loop)))
+    }
+
+    /// The row the sound with id `sound` is on, if the list shows it. `at` is its place in the whole list, where
+    /// that's known: while the sound is still there (the same library), only the rows are looked through for it, which
+    /// is quick enough for every list worked out while the Edit strip is open. If not, it's a look through the sounds
+    /// (only when a list is worked out again).
+    fn row_of(&self, sound: i64, at: Option<usize>) -> Option<usize> {
         let library = self.library.borrow();
         let list = &library.as_ref()?.list;
-        self.shown.borrow().iter().position(|&at| list.sound(at).is_some_and(|s| s.id == sound))
+        let shown = self.shown.borrow();
+        let is_it = |at: usize| list.sound(at).is_some_and(|s| s.id == sound);
+        match at.filter(|&at| is_it(at)) {
+            Some(at) => shown.iter().position(|&row| row == at),
+            None => shown.iter().position(|&at| is_it(at)),
+        }
     }
 }
 
@@ -682,6 +717,8 @@ struct Shown {
     /// The Presets tab.
     presets: presets_tab::PresetsTab,
     curves: curves_tab::CurvesTab,
+    /// The Edit strip along the bottom of the Sounds tab.
+    edit: Rc<edit_strip::OnPanel>,
     /// What's being dragged out now.
     carried: Cell<Option<Carried>>,
     /// The last take Record saved, shown as a line to hear and drag out.
@@ -705,8 +742,9 @@ struct Shown {
     /// The take whose chords are shown and their rows, changed in place while it's the same take (so a list
     /// scrolled down stays where it is).
     take_rows: RefCell<Option<(String, Rc<VecModel<LabelLine>>)>>,
-    /// The sound the "Playing" line names, as the player numbers it: the line goes when that sound ends.
-    playing: Cell<Option<u64>>,
+    /// The sound the "Playing" line names, as the player numbers it: the line goes when that sound ends. Shared with
+    /// the Edit strip, whose play is one of them.
+    playing: Rc<Cell<Option<u64>>>,
     /// The line last clicked to play: its row, its sound and its file.
     played: Rc<RefCell<Option<(usize, i64, std::path::PathBuf)>>>,
     /// How wide the panel draws a line's waveform, in logical pixels: the pictures are made for it.
@@ -754,16 +792,22 @@ impl Shown {
         let panel = panel.map_err(|e| format!("Couldn't make the panel: {e}"))?;
         let widths_seen = Cell::new(connect_globals(&panel));
 
-        let lines = Rc::new(Lines {
-            library: RefCell::new(None),
-            next: RefCell::new(None),
-            shown: RefCell::new(Arc::default()),
-            waves: RefCell::new(Kept::default()),
-            notify: ModelNotify::default(),
-        });
+        let lines = Rc::new(Lines::default());
         let slots = Arc::new(Slots::default());
         // What the last window left playing: a click on it still stops it, and a part still follows the tempo.
         let left = lock(&instance.left_playing).take().unwrap_or_default();
+        let (heard, playing) = (Rc::new(Cell::new(left.heard)), Rc::new(Cell::new(left.playing)));
+        // The Edit strip as the last window left it: each sound's edits are where they were.
+        let strip = lock(&instance.edit_strip).take().unwrap_or_default();
+        let edit = edit_strip::OnPanel::new(
+            &panel,
+            strip,
+            Rc::clone(&lines),
+            Arc::clone(&instance.player),
+            Arc::clone(&slots),
+            Rc::clone(&heard),
+            Rc::clone(&playing),
+        );
         let shown = Shown {
             context,
             draws,
@@ -779,6 +823,7 @@ impl Shown {
             column: Rc::new(Column::default()),
             midi: midi_tab::MidiTab::new(),
             presets: presets_tab::PresetsTab::new(),
+            edit,
             carried: Cell::new(None),
             recorded: Rc::default(),
             record_menu: Rc::default(),
@@ -790,13 +835,13 @@ impl Shown {
             take_picked: Rc::default(),
             takes_shown: Rc::default(),
             take_rows: RefCell::default(),
-            playing: Cell::new(left.playing),
+            playing,
             played: Rc::new(RefCell::new(None)),
             wave_width: Cell::new(waves::WIDTH as f32),
             dragging: Cell::new(false),
             right_now: Rc::default(),
             keys_told: Cell::new([false; 3]),
-            heard: Rc::new(Cell::new(left.heard)),
+            heard,
             part: Rc::new(RefCell::new(left.part)),
             tempo_seen: Cell::new(None),
             sky: Rc::default(),
@@ -853,7 +898,8 @@ impl Shown {
         panel.on_play(move |row, from| {
             let Some(row) = usize::try_from(row).ok() else { return };
             let Some(sound) = lines.sound(row) else { return };
-            let playing = heard.get().is_some_and(|(what, _)| what == Heard::Line(sound));
+            // The line's own sound, or the Edit strip's edit of it: a click on the line stops either.
+            let playing = heard.get().is_some_and(|(what, _)| what == Heard::Line(sound) || what == Heard::Edit(sound));
             let from = match line_click(playing, right_now.get(), from) {
                 Click::Play(from) => from,
                 Click::Stop => return stop_it(),
@@ -953,19 +999,9 @@ impl Shown {
             // Whether the file is there is asked off the window's thread: its drive may be asleep or away.
             let asked = slots.ask_drag();
             background("mo-plugin-drag", move || {
-                let path = std::path::PathBuf::from(path);
+                let path = PathBuf::from(path);
                 let found = if path.is_file() {
-                    // Trim silence on: the trimmed copy goes instead, as the app drags it (loops go as they are), or
-                    // the whole file when one can't be made: the panel says so, and the log says why (SN-12).
-                    let (path, why) = mo_app::trim_copy::to_drag(&path, trim, is_loop);
-                    if let Some(why) = why {
-                        crate::log::line("Drag", &why);
-                        *lock(&slots.untrimmed) = Some(format!(
-                            "{} went untrimmed (the log says why)",
-                            library::name(&path.to_string_lossy())
-                        ));
-                    }
-                    Ok(path)
+                    Ok(sound_to_drag(&path, trim, is_loop, &slots))
                 } else {
                     Err(format!("Can't drag {}: the file isn't there", library::name(&path.to_string_lossy())))
                 };
@@ -1070,6 +1106,7 @@ impl Shown {
         self.midi.fill_in(panel, &self.slots);
         self.presets.fill_in(panel, &self.slots, &self.instance);
         self.curves.fill_in(panel, &self.slots);
+        self.edit.fill_in(panel);
         self.fill_in_midi_play();
         self.fill_in_record();
         self.fill_in_chords();
@@ -2098,11 +2135,16 @@ impl Shown {
         if let Some((number, library, found, counts, again)) = take(&self.slots.found)
             && number == self.slots.searches.load(Ordering::Acquire)
         {
-            // The same asking worked out again: the sound picked stays picked, wherever it is in the new list.
+            // The same asking worked out again: the sound picked stays picked, wherever it is in the new list. And
+            // through any asking the sound the Edit strip is open on stays picked, while the new list still shows it
+            // (when it doesn't, the strip stays open on its sound all the same).
             let picked = match again {
-                Again::Yes => usize::try_from(self.panel.get_picked()).ok().and_then(|row| self.lines.sound(row)),
+                Again::Yes => usize::try_from(self.panel.get_picked())
+                    .ok()
+                    .and_then(|row| Some((self.lines.sound(row)?, self.lines.at(row)))),
                 Again::No => None,
-            };
+            }
+            .or_else(|| self.edit.on());
             // A library read again comes on show with its first list: the Galaxy's stars are read again for it.
             let before = self.lines.library.borrow().clone();
             if before.is_some_and(|b| !Arc::ptr_eq(&b, &library)) {
@@ -2129,24 +2171,31 @@ impl Shown {
             let found = Arc::new(found);
             self.sky.borrow_mut().set_shown(Arc::clone(&found));
             self.lines.show(library, found);
-            let row = picked.and_then(|sound| self.lines.row_of(sound)).and_then(|row| i32::try_from(row).ok());
-            self.panel.set_picked(row.unwrap_or(-1));
+            let row = picked.and_then(|(sound, at)| self.lines.row_of(sound, at));
+            self.panel.set_picked(row.and_then(|row| i32::try_from(row).ok()).unwrap_or(-1));
         }
         if let Some(played) = take(&self.slots.played) {
+            // The Edit strip's play is handed over at once, with no read to wait for: how an older pick went can
+            // come here after it has started. That play is what's heard then, and stays so.
+            let strip_plays = matches!(self.heard.get(), Some((Heard::Edit(_), _)));
             let line = match played {
+                Played::Playing(_, n) if self.playing.get().is_some_and(|newest| newest > n) => None,
+                Played::Not(_) if strip_plays => None,
                 Played::Playing(name, n) => {
                     self.playing.set(Some(n));
                     // What was clicked is what's heard now.
                     self.heard.set(self.heard.get().map(|(what, _)| (what, true)));
-                    format!("Playing {name}")
+                    Some(format!("Playing {name}"))
                 }
                 Played::Not(why) => {
                     self.playing.set(None);
                     self.heard.set(None);
-                    why
+                    Some(why)
                 }
             };
-            self.panel.set_playing(line.into());
+            if let Some(line) = line {
+                self.panel.set_playing(line.into());
+            }
         }
         if let Some(said) = take(&self.slots.sampler) {
             self.panel.set_playing(said.into());
@@ -2163,16 +2212,24 @@ impl Shown {
             }
             self.panel.set_playing(SharedString::new());
         }
-        // The line on the waveform of the line clicked, while that sound plays and the line still shows it.
-        let line = self.playing.get().and_then(|n| {
-            let at = self.instance.player.place(n)?;
-            let played = self.played.borrow();
-            let (row, sound, _) = played.as_ref()?;
-            (self.lines.sound(*row) == Some(*sound)).then_some((i32::try_from(*row).ok()?, at))
-        });
+        // The Edit strip: what its threads found, the line picked for it, and its play as it goes.
+        self.edit.tick(&self.panel);
+        // The line on the waveform of the line clicked, while that sound plays and the line still shows it. What the
+        // Edit strip plays is an edit: where that is in the sound's own file is the strip's to say.
+        let line = match self.heard.get() {
+            Some((Heard::Edit(_), _)) => self.edit.line_head(&self.panel),
+            // The line's own file: on a line the strip has a part of, the part is lit as far as it has played.
+            _ => self.playing.get().and_then(|n| {
+                let at = self.instance.player.place(n)?;
+                let played = self.played.borrow();
+                let (row, sound, _) = played.as_ref()?;
+                (self.lines.sound(*row) == Some(*sound)).then_some((i32::try_from(*row).ok()?, at, 0.0))
+            }),
+        };
         match line {
-            Some((row, at)) => {
+            Some((row, at, from)) => {
                 self.panel.set_playing_at(at);
+                self.panel.set_edit_played_from(from);
                 self.panel.set_playing_row(row);
             }
             None => self.panel.set_playing_row(-1),
@@ -2237,6 +2294,13 @@ impl Shown {
                         self.panel.set_curve_edit_lifted(self.panel.get_curve_editing());
                     }
                     Carried::Recording => self.panel.set_recorded_carried(true),
+                    Carried::Edit => {
+                        self.edit.lifted(&self.panel, true);
+                        // The sound itself, carried whole with Trim silence on, went untrimmed: the panel says so.
+                        if let Some(said) = take(&self.slots.untrimmed) {
+                            self.panel.set_playing(said.into());
+                        }
+                    }
                 }
                 let (slots, started) = (Arc::clone(&self.slots), Instant::now());
                 crate::drag::file(path.clone(), move |ended| *lock(&slots.dragged) = Some((path, started, ended)));
@@ -2265,6 +2329,10 @@ impl Shown {
         self.panel.set_curve_carried(-1);
         self.panel.set_curve_edit_lifted(false);
         self.panel.set_recorded_carried(false);
+        self.edit.lifted(&self.panel, false);
+        if self.carried.get() == Some(Carried::Edit) && matches!(ended, Ok(crate::drag::Outcome::Landed)) {
+            self.edit.landed(&self.panel);
+        }
         // The system's drag kept the button's coming up for itself: the panel is told, so the line isn't left
         // pressed.
         let position = self.pointer.get();
@@ -2284,6 +2352,8 @@ impl Shown {
             Some(Carried::Preset(_)) => return self.panel.set_preset_said(why.into()),
             Some(Carried::Curve(_)) => return self.panel.set_curve_said(why.into()),
             Some(Carried::Recording) => return self.panel.set_record_said(why.into()),
+            // The Edit strip's: said where the panel says what plays, and what plays is left as it is.
+            Some(Carried::Edit) => return self.panel.set_playing(why.into()),
             _ => {}
         }
         self.playing.set(None);
@@ -2441,14 +2511,29 @@ impl Shown {
             }
         }
     }
+
+    /// The mouse is going down on the Edit strip: the keys go to the lists, as a click on a line gives them (the
+    /// panel's `list-keys`), so a box that was being typed in doesn't take the strip's keys from then on (Space, Alt+T).
+    /// The strip has nothing to type in.
+    fn press_on_the_strip(&self) {
+        let (top, height) = (self.panel.get_edit_top(), self.panel.get_edit_height());
+        let y = self.pointer.get().y;
+        if height > 0.0 && y >= top && y < top + height {
+            self.panel.invoke_keys_to_lists();
+        }
+    }
 }
 
 impl Drop for Shown {
-    /// What's playing plays on with the window closed: the next window takes it ([`LeftPlaying`]).
+    /// What's playing plays on with the window closed: the next window takes it ([`LeftPlaying`]). And the Edit strip
+    /// waits for the next window with each sound's edits ([`crate::Instance::edit_strip`]).
     fn drop(&mut self) {
         let part = self.part.try_borrow_mut().ok().and_then(|mut part| part.take());
         let left = LeftPlaying { heard: self.heard.get(), playing: self.playing.get(), part };
         *lock(&self.instance.left_playing) = Some(left);
+        if let Some(strip) = self.edit.put_away() {
+            *lock(&self.instance.edit_strip) = Some(strip);
+        }
     }
 }
 
@@ -2492,6 +2577,7 @@ impl WindowHandler for Shown {
                         let _ = self.context.focus();
                     }
                     self.keys_held(modifiers);
+                    self.press_on_the_strip();
                     self.right_now.set(button == MouseButton::Right);
                     self.send(Slint::PointerPressed { position: self.pointer.get(), button: slint_button(button) });
                     self.right_now.set(false);
@@ -2517,18 +2603,39 @@ impl WindowHandler for Shown {
                 _ => return EventStatus::Ignored,
             },
             Event::Keyboard(key) => {
-                // Esc stops the sound.
-                if key.state == KeyState::Down && !key.repeat && key.key == Key::Named(NamedKey::Escape) {
+                let down = key.state == KeyState::Down;
+                // Esc stops the sound. With none to stop, it's the Edit strip's (below).
+                let sounding = self.playing.get().is_some() || self.heard.get().is_some();
+                if down && !key.repeat && key.key == Key::Named(NamedKey::Escape) {
                     self.stop();
                 }
-                let Some(text) = key_text(&key.key) else { return EventStatus::Ignored };
+                let Some(text) = key_text(&key.key) else {
+                    // A key Slint has no sign for (F5): the Edit strip's when the shortcut list gives it one of the
+                    // strip's jobs. Any other is left to the DAW, as before.
+                    if !down {
+                        // Let go: it stops the original, if it's the key held for that.
+                        self.edit.key_up(&key_base(&key));
+                        return EventStatus::Ignored;
+                    }
+                    if !self.edit.key(&self.panel, &key, sounding) {
+                        return EventStatus::Ignored;
+                    }
+                    if !self.draws.waits_for_the_screen() {
+                        self.render();
+                    }
+                    return EventStatus::Captured;
+                };
                 // What Slint knows of Shift, Ctrl and Alt from here on.
                 if let Some(at) = held_key(&key.key) {
                     let mut told = self.keys_told.get();
-                    told[at] = key.state == KeyState::Down;
+                    told[at] = down;
                     self.keys_told.set(told);
                 }
-                key_in(self.draws.window(), &self.panel, &key, text);
+                key_in(self.draws.window(), &self.panel, &key, text, || self.edit.key(&self.panel, &key, sounding));
+                if !down {
+                    // O let go stops the original, whatever has the keys by now.
+                    self.edit.key_up(&key_base(&key));
+                }
                 if !self.draws.waits_for_the_screen() {
                     self.render();
                 }
@@ -2537,6 +2644,8 @@ impl WindowHandler for Shown {
             Event::Window(WindowEvent::Unfocused) => {
                 // Slint lets go of Shift, Ctrl and Alt itself when its window loses the keys.
                 self.keys_told.set([false; 3]);
+                // A key held as they went is never seen let go here: O stops the original now.
+                self.edit.keys_gone();
                 self.send(Slint::WindowActiveChanged(false));
             }
             _ => return EventStatus::Ignored,
@@ -2962,6 +3071,8 @@ enum Heard {
     Star(usize),
     /// A MIDI part, by its place in the MIDI tab's catalogue.
     Part(usize),
+    /// The Edit strip's play of a sound (its edit, or the original it's of), by the sound's id.
+    Edit(i64),
 }
 
 /// What a click on a list line does.
@@ -3011,18 +3122,33 @@ fn held_key(key: &Key) -> Option<usize> {
 
 /// Hands a key to the panel (`text`, as [`key_text`] makes it). What has the keys there uses it first: a text box (a
 /// search, the folder tree's, a chord's "Type it") moves its cursor with the arrows, and the Galaxy turns with them.
-/// An arrow nothing used moves through the list on show (Solomon, 25 Nov), held down too: Up and Down to the line
-/// above or below, Left stops the sound and Right plays it again. So what has the keys now decides, as Slint says,
-/// not a note of which box had them last, which a box that went (a tab changed, the tree folded) never put right
-/// (the 26 Nov review's CP-1). A click on a line gives the lists the keys back (the panel's `list-keys`).
-fn key_in(window: &slint::Window, panel: &Panel, key: &keyboard_types::KeyboardEvent, text: SharedString) {
+/// A key on its way down that nothing used is the Edit strip's when it's one of the strip's own (`strip` says whether
+/// it took it: Space, Alt+T, Esc). If not, an arrow moves through the list on show (Solomon, 25 Nov), held down too:
+/// Up and Down to the line above or below, Left stops the sound and Right plays it again. So what has the keys now
+/// decides, as Slint says, not a note of which box had them last, which a box that went (a tab changed, the tree
+/// folded) never put right (the 26 Nov review's CP-1). A click on a line gives the lists the keys back (the panel's
+/// `list-keys`).
+fn key_in(
+    window: &slint::Window,
+    panel: &Panel,
+    key: &KeyboardEvent,
+    text: SharedString,
+    strip: impl FnOnce() -> bool,
+) {
     use slint::platform::{WindowEvent as Slint, WindowEventDispatchResult as Used};
     let event = match (key.state, key.repeat) {
         (KeyState::Down, false) => Slint::KeyPressed { text },
         (KeyState::Down, true) => Slint::KeyPressRepeated { text },
         (KeyState::Up, _) => Slint::KeyReleased { text },
     };
-    if matches!(window.dispatch_event_with_result(event), Ok(Used::Accepted)) || key.state != KeyState::Down {
+    // Slint says it used every Esc, with a menu to close or with none: whether it has one is asked before it gets it.
+    let esc = key.key == Key::Named(NamedKey::Escape);
+    let menu = esc && menu_open(window);
+    let used = matches!(window.dispatch_event_with_result(event), Ok(Used::Accepted));
+    if key.state != KeyState::Down || if esc { menu } else { used } {
+        return;
+    }
+    if strip() {
         return;
     }
     match key.key {
@@ -3032,6 +3158,12 @@ fn key_in(window: &slint::Window, panel: &Panel, key: &keyboard_types::KeyboardE
         Key::Named(NamedKey::ArrowRight) if !key.repeat => panel.invoke_side(1),
         _ => {}
     }
+}
+
+/// Whether a menu is open in the panel: Esc closes it, and is nothing else's then. Slint has no question for it in
+/// the part it promises to keep: this is how its own windows ask, in the same version of it (`Cargo.toml`).
+fn menu_open(window: &slint::Window) -> bool {
+    !i_slint_core::window::WindowInner::from_pub(window).active_popups().is_empty()
 }
 
 /// What Slint is told a key typed: the letters it gives, or Slint's own sign for a key that types none.
@@ -3064,6 +3196,120 @@ fn key_text(key: &Key) -> Option<SharedString> {
         _ => return None,
     };
     Some(key.into())
+}
+
+/// A key as the app's shortcut list writes keys ("Alt+T", "Ctrl+Shift+Z", "Space", "F5"), from a key as the DAW's
+/// window hands it over: "" for one the list has no name for (Shift, Ctrl or Alt on its own). The app's own windows
+/// name theirs the same way, from what Slint tells them (mo-ui's `key_name`).
+fn key_name(key: &KeyboardEvent) -> String {
+    let base = key_base(key);
+    if base.is_empty() {
+        return base;
+    }
+    let (ctrl, meta) = ctrl_and_meta(key.modifiers);
+    let held = [
+        (ctrl, "Ctrl+"),
+        (key.modifiers.contains(Modifiers::SHIFT), "Shift+"),
+        (key.modifiers.contains(Modifiers::ALT), "Alt+"),
+        (meta, "Meta+"),
+    ];
+    let mut name: String = held.iter().filter(|(on, _)| *on).map(|(_, word)| *word).collect();
+    name.push_str(&base);
+    name
+}
+
+/// Whether the shortcut list's Ctrl and its Meta are held: on a Mac, Cmd is its Ctrl and Ctrl its Meta, as in Slint's
+/// own windows ([`key_text`]).
+fn ctrl_and_meta(held: Modifiers) -> (bool, bool) {
+    let (ctrl, meta) = (held.contains(Modifiers::CONTROL), held.contains(Modifiers::META));
+    if cfg!(target_os = "macos") { (meta, ctrl) } else { (ctrl, meta) }
+}
+
+/// [`key_name`] without Ctrl, Shift and Alt: the key itself ("T", "Space", "Up").
+///
+/// With Ctrl or Alt held, some systems hand over what the key types then and not its letter: a control character for
+/// Ctrl+Z, a dagger for Alt+T on a Mac. A control character says which letter it is. For anything else the key's
+/// place on the keyboard names it ("KeyT" is T), which is what the shortcut list means by Alt+T. AltGr is neither
+/// Ctrl nor Alt here: what it types is the key.
+fn key_base(key: &KeyboardEvent) -> String {
+    let text = match &key.key {
+        Key::Character(text) => text,
+        Key::Named(named) => {
+            let name = match named {
+                NamedKey::F1 => "F1",
+                NamedKey::F2 => "F2",
+                NamedKey::F3 => "F3",
+                NamedKey::F4 => "F4",
+                NamedKey::F5 => "F5",
+                NamedKey::F6 => "F6",
+                NamedKey::F7 => "F7",
+                NamedKey::F8 => "F8",
+                NamedKey::F9 => "F9",
+                NamedKey::F10 => "F10",
+                NamedKey::F11 => "F11",
+                NamedKey::F12 => "F12",
+                NamedKey::PageUp => "PageUp",
+                NamedKey::PageDown => "PageDown",
+                NamedKey::ArrowLeft => "Left",
+                NamedKey::ArrowRight => "Right",
+                NamedKey::ArrowUp => "Up",
+                NamedKey::ArrowDown => "Down",
+                NamedKey::Delete => "Delete",
+                NamedKey::Escape => "Esc",
+                NamedKey::Tab => "Tab",
+                NamedKey::Enter => "Enter",
+                NamedKey::Home => "Home",
+                NamedKey::End => "End",
+                NamedKey::Insert => "Insert",
+                NamedKey::Backspace => "Backspace",
+                _ => "",
+            };
+            return name.to_owned();
+        }
+    };
+    let mut chars = text.chars();
+    let (Some(typed), None) = (chars.next(), chars.next()) else { return String::new() };
+    if typed == ' ' {
+        return "Space".to_owned();
+    }
+    // Ctrl with a letter can come as that letter's control character (Ctrl+Z as the 26th): the letter is in it,
+    // wherever its key is on this keyboard (on a French one, where QWERTY has its W).
+    if key.modifiers.contains(Modifiers::CONTROL) && ('\u{1}'..='\u{1a}').contains(&typed) {
+        return char::from(b'A' + typed as u8 - 1).to_string();
+    }
+    let (ctrl, meta) = ctrl_and_meta(key.modifiers);
+    let with_one = ctrl || meta || key.modifiers.contains(Modifiers::ALT);
+    if with_one
+        && !typed.is_ascii_alphanumeric()
+        && let Some(on_it) = board_key(key.code)
+    {
+        return on_it.to_string();
+    }
+    // A key that types nothing is no shortcut.
+    if typed.is_control() { String::new() } else { typed.to_uppercase().collect() }
+}
+
+/// The letter or digit on a key, by the key's place on the keyboard ("KeyT": T, "Digit4": 4); none for any other key.
+fn board_key(code: Code) -> Option<char> {
+    let name = code.to_string();
+    let mut on_it = name.strip_prefix("Key").or_else(|| name.strip_prefix("Digit"))?.chars();
+    match (on_it.next(), on_it.next()) {
+        (Some(c), None) if c.is_ascii_alphanumeric() => Some(c),
+        _ => None,
+    }
+}
+
+/// The file a sound goes out of the window as when its line is dragged (the file is there): with Trim silence on
+/// (`trim`), its trimmed copy, as the app drags it (loops go as they are), or the file itself when the copy can't be
+/// made: the panel says so then, and the log says why (SN-12).
+fn sound_to_drag(path: &Path, trim: Option<i32>, is_loop: bool, slots: &Slots) -> PathBuf {
+    let (path, why) = mo_app::trim_copy::to_drag(path, trim, is_loop);
+    if let Some(why) = why {
+        crate::log::line("Drag", &why);
+        let said = format!("{} went untrimmed (the log says why)", library::name(&path.to_string_lossy()));
+        *lock(&slots.untrimmed) = Some(said);
+    }
+    path
 }
 
 /// Labels chord `row` of the take `id` (the one picked) and saves the take off the window's thread, in the data
@@ -3157,7 +3403,7 @@ mod tests {
 
     /// A panel as the plugin's window makes it (its shared parts wired as there), drawn on the processor in a window
     /// of its own 1280 by 800, with nothing behind it: no DAW, no files.
-    fn test_panel() -> (Panel, Rc<MinimalSoftwareWindow>) {
+    pub(super) fn test_panel() -> (Panel, Rc<MinimalSoftwareWindow>) {
         let _ = slint::platform::set_platform(Box::new(Platform { started: Instant::now() }));
         let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
         NEXT.with(|next| *next.borrow_mut() = Some(Rc::clone(&window) as Rc<dyn WindowAdapter>));
@@ -3169,7 +3415,7 @@ mod tests {
     }
 
     /// Draws the panel once, so its lists have made the lines in sight.
-    fn draw(window: &MinimalSoftwareWindow) {
+    pub(super) fn draw(window: &MinimalSoftwareWindow) {
         let mut picture = vec![Pixel::default(); 1280 * 800];
         window.request_redraw();
         window.draw_if_needed(|renderer| {
@@ -3185,12 +3431,44 @@ mod tests {
         window.dispatch_event(Slint::PointerReleased { position, button });
     }
 
-    /// A key pressed and let go, as the window hands it on.
+    /// A key pressed and let go, as the window hands it on (with no Edit strip there to take it).
     fn press(window: &MinimalSoftwareWindow, panel: &Panel, key: Key) {
         let text = key_text(&key).unwrap();
-        let down = keyboard_types::KeyboardEvent { state: KeyState::Down, key, ..Default::default() };
-        key_in(window.window(), panel, &down, text.clone());
-        key_in(window.window(), panel, &keyboard_types::KeyboardEvent { state: KeyState::Up, ..down }, text);
+        let down = KeyboardEvent { state: KeyState::Down, key, ..Default::default() };
+        key_in(window.window(), panel, &down, text.clone(), || false);
+        key_in(window.window(), panel, &KeyboardEvent { state: KeyState::Up, ..down }, text, || false);
+    }
+
+    #[test]
+    fn esc_closes_an_open_menu_and_only_with_none_open_is_the_edit_strips() {
+        let (panel, window) = test_panel();
+        draw(&window);
+        let asked = Cell::new(0);
+        let esc = || {
+            let down = KeyboardEvent { state: KeyState::Down, key: Key::Named(NamedKey::Escape), ..Default::default() };
+            let text = key_text(&down.key).unwrap();
+            key_in(window.window(), &panel, &down, text, || {
+                asked.set(asked.get() + 1);
+                true
+            });
+        };
+        // No menu open: Slint has nothing to do with an Esc (though it says it used it), so the strip is asked.
+        esc();
+        assert_eq!(asked.get(), 1);
+        // The Trim silence menu, top right, opened with a click (looked for from the right edge in).
+        let mut x = 1255.0;
+        while !menu_open(window.window()) && x > 1160.0 {
+            click(&window, x, 93.0);
+            x -= 10.0;
+        }
+        assert!(menu_open(window.window()), "the menu opened");
+        // Esc closes it, and that's all it does.
+        esc();
+        assert!(!menu_open(window.window()));
+        assert_eq!(asked.get(), 1);
+        // The next one is the strip's again.
+        esc();
+        assert_eq!(asked.get(), 2);
     }
 
     #[test]
@@ -3367,5 +3645,72 @@ mod tests {
         assert_eq!(key_text(&Key::Character("a".into())), Some("a".into()));
         assert_eq!(key_text(&Key::Named(NamedKey::Backspace)), Some(slint::platform::Key::Backspace.into()));
         assert_eq!(key_text(&Key::Named(NamedKey::F1)), None);
+    }
+
+    #[test]
+    fn keys_are_named_as_the_shortcut_list_writes_them() {
+        let key =
+            |key: Key, code: Code, modifiers: Modifiers| KeyboardEvent { key, code, modifiers, ..Default::default() };
+        let typed = |text: &str, code: Code, held: Modifiers| key(Key::Character(text.into()), code, held);
+        let none = Modifiers::empty();
+        // The shortcut list's Ctrl is Cmd on a Mac.
+        let ctrl = if cfg!(target_os = "macos") { Modifiers::META } else { Modifiers::CONTROL };
+        assert_eq!(key_name(&typed("t", Code::KeyT, Modifiers::ALT)), "Alt+T");
+        assert_eq!(key_name(&typed("z", Code::KeyZ, ctrl)), "Ctrl+Z");
+        assert_eq!(key_name(&typed("Z", Code::KeyZ, ctrl | Modifiers::SHIFT)), "Ctrl+Shift+Z");
+        assert_eq!(key_name(&typed(" ", Code::Space, none)), "Space");
+        assert_eq!(key_name(&typed("o", Code::KeyO, none)), "O");
+        assert_eq!(key_name(&key(Key::Named(NamedKey::ArrowUp), Code::ArrowUp, Modifiers::ALT)), "Alt+Up");
+        assert_eq!(key_name(&key(Key::Named(NamedKey::Escape), Code::Escape, none)), "Esc");
+        assert_eq!(key_name(&key(Key::Named(NamedKey::F5), Code::F5, none)), "F5");
+        // What a key types with Ctrl or Alt held isn't its letter on every system: its place on the keyboard is.
+        assert_eq!(key_name(&typed("\u{1a}", Code::KeyZ, ctrl)), "Ctrl+Z");
+        // A control character says its letter itself: on a French keyboard Z is where QWERTY has its W.
+        assert_eq!(key_base(&typed("\u{1a}", Code::KeyW, Modifiers::CONTROL)), "Z");
+        assert_eq!(key_base(&typed("\u{1}", Code::KeyQ, Modifiers::CONTROL)), "A");
+        assert_eq!(key_name(&typed("\u{2020}", Code::KeyT, Modifiers::ALT)), "Alt+T");
+        assert_eq!(key_name(&typed("\u{a1}", Code::Digit1, Modifiers::ALT)), "Alt+1");
+        // AltGr types a sign of its own: it's neither Ctrl nor Alt.
+        assert_eq!(key_name(&typed("\u{20ac}", Code::KeyE, Modifiers::ALT_GRAPH)), "\u{20ac}");
+        // Shift, Ctrl and Alt on their own are no shortcut, and nor is a key that types more than one letter.
+        assert_eq!(key_name(&key(Key::Named(NamedKey::Shift), Code::ShiftLeft, Modifiers::SHIFT)), "");
+        assert_eq!(key_name(&typed("ab", Code::KeyA, none)), "");
+        assert_eq!(key_name(&typed("\u{1a}", Code::Unidentified, none)), "");
+        // Let go, a key is named without them: O stops the original however Shift is held by then.
+        assert_eq!(key_base(&typed("O", Code::KeyO, Modifiers::SHIFT)), "O");
+        // Every key the Edit strip has in the shortcut list is one the window can name.
+        let keys = mo_app::shortcuts::Shortcuts::default();
+        for id in [mo_app::edit_strip::EDIT, mo_app::edit_strip::SAVE, mo_app::edit_strip::LOUDER, "app.play"] {
+            let listed = keys.key_of(id);
+            let last = listed.rsplit('+').next().unwrap();
+            let named = ["Up", "Down", "Space"].contains(&last) || (last.len() == 1 && last.is_ascii());
+            assert!(named, "{id} is {listed}");
+        }
+    }
+
+    #[test]
+    fn a_sounds_row_is_found_by_its_place_in_the_list_or_by_a_look_through_it() {
+        let sounds = [(10, r"D:\Drums\kick.wav"), (11, r"D:\Drums\snare.wav"), (12, r"D:\Loops\break.wav")];
+        let library =
+            Arc::new(Library::new(sounds.iter().map(|(id, path)| mo_sounds::Sound::new(*id, path)).collect()));
+        let at = |id: i64| library.list.find(id).unwrap();
+        let lines = Lines::default();
+        // The list shows the break, then the kick.
+        lines.show(Some(Arc::clone(&library)), Arc::new(vec![at(12), at(10)]));
+        assert_eq!((lines.sound(0), lines.at(0)), (Some(12), Some(at(12))));
+        assert_eq!(lines.row_of(12, Some(at(12))), Some(0));
+        assert_eq!(lines.row_of(10, Some(at(10))), Some(1));
+        // With no place known, or one that's another sound's by now (the library was read again), it's looked for.
+        assert_eq!(lines.row_of(10, None), Some(1));
+        assert_eq!(lines.row_of(10, Some(at(12))), Some(1));
+        assert_eq!(lines.row_of(10, Some(99)), Some(1));
+        // A sound the list doesn't show has no row.
+        assert_eq!(lines.row_of(11, Some(at(11))), None);
+        assert_eq!(lines.row_of(99, None), None);
+        // What the Edit strip takes a line as.
+        let (picked, place, is_loop) = lines.picked(0).unwrap();
+        assert_eq!((picked.id, picked.name.as_str(), place, is_loop), (12, "break", at(12), false));
+        assert_eq!((picked.seconds, picked.bpm), (0.0, None));
+        assert!(lines.picked(2).is_none());
     }
 }

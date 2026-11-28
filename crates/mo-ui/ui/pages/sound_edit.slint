@@ -182,6 +182,10 @@ export global SoundEdit {
     // ("0.23 s · pad E1"); with none picked, only the pads they all go on ("Pads C1 to G3").
     in property <string> slice-name;
     in property <string> slice-facts;
+    // Whether the Slices are here yet (the plugin's strip gets them in its next step: until then their key is faint,
+    // with why in its tip), and how long the edits wait, as the tip says it.
+    in property <bool> can-slice: true;
+    in property <string> kept-while: "while the app is open";
     // The keys from the shortcut list, for the tips.
     in property <string> play-key;
     in property <string> slices-key;
@@ -835,11 +839,14 @@ component SliceChoices inherits HorizontalLayout {
 
 // The strip.
 export component EditStrip inherits Rectangle {
+    // Its name among the parts you can drag, which has its least and most height: the app's Sounds page and the
+    // plugin's panel each have one of their own, kept where each keeps its widths.
+    in property <string> part;
     // The most a drag may make it: the page keeps room above it. Only the drag reads it: the strip's height is the
     // page's to share out (a short window takes room from the list first, then from the strip, down to its least).
     in property <length> most-height;
-    min-height: Widths.least("sounds.edit");
-    preferred-height: clamp(Widths.sounds-edit, Widths.least("sounds.edit"), Widths.most("sounds.edit"));
+    min-height: Widths.least(root.part);
+    preferred-height: clamp(Widths.sounds-edit, Widths.least(root.part), Widths.most(root.part));
     max-height: self.preferred-height;
     vertical-stretch: 0;
     background: Theme.surface;
@@ -1018,9 +1025,9 @@ export component EditStrip inherits Rectangle {
                                 last: true;
                                 tight: root.tight;
                                 icon: Icons.slices;
-                                tip: "Slices: cut it at its hits for a drum machine's pads";
-                                key: SoundEdit.slices-key;
-                                enabled: root.on;
+                                tip: SoundEdit.can-slice ? "Slices: cut it at its hits for a drum machine's pads" : "Slices: coming to the plugin next";
+                                key: SoundEdit.can-slice ? SoundEdit.slices-key : "";
+                                enabled: root.on && SoundEdit.can-slice;
                                 clicked => { SoundEdit.tool("sounds.editSlices"); }
                             }
                         }
@@ -1271,7 +1278,7 @@ export component EditStrip inherits Rectangle {
                 InfoTip {
                     text: SoundEdit.slicing
                         ? "A line at every cut: drag one to move it (it snaps to the hits; hold Shift for none), double-click one to take it away, or between two to add one. Click a slice to hear it, or drag it out on its own. The slices you send are saved in a folder of their own in " + SoundEdit.folder-text + "; the file on disk never changes."
-                        : "The file on disk never changes: what you save or drag out is a copy in " + SoundEdit.folder-text + ". Your edits wait here while the app is open, sound by sound, until you come back to them.";
+                        : "The file on disk never changes: what you save or drag out is a copy in " + SoundEdit.folder-text + ". Your edits wait here " + SoundEdit.kept-while + ", sound by sound, until you come back to them.";
                 }
             }
             // The drag handle: the edit's (or the part's); with the Slices on, the slice picked's, and it waits until
@@ -1425,9 +1432,9 @@ export component EditStrip inherits Rectangle {
         x: 0;
         y: -self.height / 2;
         width: parent.width;
-        part: "sounds.edit";
+        part: root.part;
         now: root.height;
-        most: max(Widths.least("sounds.edit"), min(Widths.most("sounds.edit"), root.most-height));
+        most: max(Widths.least(root.part), min(Widths.most(root.part), root.most-height));
         resizing(h) => { Widths.sounds-edit = h; }
     }
 }

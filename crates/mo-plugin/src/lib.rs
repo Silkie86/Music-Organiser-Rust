@@ -11,7 +11,9 @@
 //! (test)", and before that "Music Organiser (test)"; its ID is still the first one, so songs that have it go on
 //! loading it). The notes played into it are read for their chords
 //! ([`chordcheck`]) and passed on out with Thru on. It writes one thing in the app's files: a curve edited in its
-//! Curves tab, kept as a new curve in `curves.db` ([`curves::save_as_new`]; Solomon, 20 Nov 2026).
+//! Curves tab, kept as a new curve in `curves.db` ([`curves::save_as_new`]; Solomon, 20 Nov 2026). And, as the app
+//! does, copies of sounds in the export folder: a sound dragged out trimmed, and an edit made in its Edit strip, saved
+//! or dragged out (never a sound's own file: rule 2).
 //!
 //! A DAW calls a plugin from several threads: the main thread (opening the window, starting and stopping the audio)
 //! and the audio thread ([`Processor`]). What they share lives in [`Instance`].
@@ -53,9 +55,9 @@ mod ui {
     slint::include_modules!();
 }
 pub use ui::{
-    ChordBox, ClipTile, CurveEditorData, CurveLine, EditorDot, ExtensionLine, FilterChoice, FilterView, InputLine,
-    LabelLine, MenuItem, Panel, PartLine, PresetLine, RulerMark, SkyName, SoundLine, SweptLine, TakeLine, Theme,
-    TrailDot, YearBar,
+    ChordBox, ClipTile, CurveEditorData, CurveLine, EditChip, EditMark, EditRoom, EditorDot, ExtensionLine,
+    FilterChoice, FilterView, InputLine, LabelLine, MenuItem, Panel, PartLine, PresetLine, RulerMark, SkyName,
+    SliceCut, SoundEdit, SoundLine, SweptLine, TakeLine, Theme, TrailDot, YearBar,
 };
 
 use audition::{Player, Playing};
@@ -118,6 +120,10 @@ pub struct Instance {
     pub record_loaded: std::sync::atomic::AtomicU64,
     /// What the last window left playing as it closed, for the next one ([`window::LeftPlaying`]).
     pub(crate) left_playing: Mutex<Option<window::LeftPlaying>>,
+    /// The Sounds tab's Edit strip as the last window left it, for the next one: each sound's edits and their undo
+    /// are where they were for as long as the plugin stays loaded (none before the first window, and while one is
+    /// open: the window has it then).
+    pub(crate) edit_strip: Mutex<Option<mo_app::edit_strip::Strip>>,
     /// The shuffled order's seed: the same each time the window opens, so it opens on the list it showed.
     pub seed: u64,
     /// Keeps what the window read while the plugin is loaded ([`kept`]).
@@ -189,6 +195,7 @@ impl DefaultPluginFactory for MoPlugin {
                 record_side: std::sync::atomic::AtomicI32::new(0),
                 record_loaded: std::sync::atomic::AtomicU64::new(0),
                 left_playing: Mutex::new(None),
+                edit_strip: Mutex::new(None),
                 seed: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_nanos() as u64),

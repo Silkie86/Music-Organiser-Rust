@@ -482,7 +482,7 @@ export global Widths {
     in-out property <length> plugins-filters: 208px;
     in-out property <length> songs-filters: 208px;
     in-out property <length> sounds-folders: 280px;
-    // The Sounds Edit strip's height.
+    // The Sounds Edit strip's height (the plugin's strip is the same one: its window sets this from its own file).
     in-out property <length> sounds-edit: 320px;
     // 0 until it's dragged: the Songs list takes a third of the room then.
     in-out property <length> songs-list: 0px;
@@ -888,6 +888,8 @@ export component StudioButton inherits Rectangle {
     in property <bool> menu;
     // A drawn sign instead of words (one of the `Icons`), for a small square button; `tip` then says what it does.
     in property <string> icon;
+    // A drawn sign before its words, for a button that keeps its word (the plugin's Edit).
+    in property <string> sign;
     // Words wider than this (less the room either side of them) go onto more lines, and it grows taller to hold them,
     // instead of running past its edges: for a button as wide as a card (`CardActions` gives it the card's room), as a
     // long one's words can be wider than a narrow card (Solomon's F12 note, 17 Nov 2026: "Send every fixed Bitwig
@@ -901,11 +903,16 @@ export component StudioButton inherits Rectangle {
     // words. A click does it again (a saved copy that has gone since is made again); while it can't be pressed it
     // looks like any button that can't, and keeps its tick.
     in property <bool> done;
-    property <bool> lit-done: root.done && root.enabled;
+    // What it opens is open now (the plugin's Edit, while the Edit strip shows): `done`'s outline in the accent on a
+    // lit face, with no tick. A click closes it again.
+    in property <bool> open;
+    property <bool> lit-done: (root.done || root.open) && root.enabled;
     property <bool> down: touch.pressed;
     changed down => { root.held(self.down); }
-    // The room either side of its words (and the menu arrow's, or the tick's).
-    property <length> edges: root.menu ? 38px : root.done ? 46px : 24px;
+    // The room its sign takes before its words.
+    property <length> sign-room: root.sign != "" && root.icon == "" ? 22px : 0px;
+    // The room either side of its words (and the menu arrow's, the tick's or the sign's).
+    property <length> edges: (root.menu ? 38px : root.done ? 46px : 24px) + root.sign-room;
     property <bool> folded: root.fold-width > 0 && root.icon == "" && label.preferred-width + root.edges > root.fold-width;
     min-width: icon != "" ? 32px : label.preferred-width + root.edges;
     // Folded, the same room above and below its words as on one line (32 px round a line of 20).
@@ -938,7 +945,7 @@ export component StudioButton inherits Rectangle {
         background: touch.pressed || root.flat || root.lit-done ? transparent : Theme.shine;
     }
     label := Text {
-        x: (parent.width - self.width - (root.menu ? 14px : root.done ? 22px : 0px)) / 2;
+        x: (parent.width - self.width - (root.menu ? 14px : root.done ? 22px : 0px) + root.sign-room) / 2;
         width: root.folded ? root.fold-width - root.edges : self.preferred-width;
         wrap: root.fold-width > 0 ? TextWrap.word-wrap : TextWrap.no-wrap;
         // A button with an icon shows only the icon; its words go in `tip`.
@@ -963,6 +970,17 @@ export component StudioButton inherits Rectangle {
         stroke-width: 1.5px;
         // Play and stop are solid, as on any transport.
         fill: root.icon == Icons.play || root.icon == Icons.stop || root.icon == Icons.pause ? label.color : transparent;
+    }
+    if root.sign != "" && root.icon == "": Path {
+        x: label.x - 22px;
+        y: (parent.height - self.height) / 2;
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: root.sign;
+        stroke: label.color;
+        stroke-width: 1.5px;
     }
     if root.done && root.icon == "": Path {
         x: label.x + label.width + 8px;
@@ -3386,6 +3404,8 @@ export global Icons {
     out property <string> ab: "M 1.5 12 L 4 4 L 6.5 12 M 2.4 9.2 L 5.6 9.2 M 9.5 4 L 9.5 12 L 12.3 12 A 2 2 0 0 0 12.3 8 L 9.5 8 L 12 8 A 2 2 0 0 0 12 4 Z";
     // A magnifier with a plus: zoom in.
     out property <string> zoom: "M 11.5 7 A 4.5 4.5 0 1 1 2.5 7 A 4.5 4.5 0 1 1 11.5 7 M 10.2 10.2 L 14 14 M 5 7 L 9 7 M 7 5 L 7 9";
+    // A waveform's bars over a line, and a pencil: open a sound in the Edit strip (the plugin's Edit).
+    out property <string> edit: "M 1.75 10 L 1.75 8 M 4 11.25 L 4 6.75 M 6.25 10 L 6.25 7.35 M 2.25 14 L 13 14 M 8.25 11.35 L 8.95 8.65 L 13.2 4.4 L 15.1 6.3 L 10.85 10.55 Z";
     // A sign by its name, for a button whose sign comes from Rust (`CardAction.icon`, mo-app's
     // `themes::button_icon`): "" for none, and for a name it doesn't know.
     public pure function named(name: string) -> string {

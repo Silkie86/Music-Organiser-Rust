@@ -181,8 +181,9 @@ impl Host for OnPage<'_> {
     }
 
     /// Swapped in by the player itself, so nothing is heard twice or missed: only while it still has the strip's play
-    /// (by the play's number).
-    fn swap(&self, audio: Arc<AudioData>, place: &dyn Fn(f64) -> f64) -> bool {
+    /// (by the play's number). Where a play of the part picked stops is the page's ticker's to see to, for a sound
+    /// swapped in as for the one first played, so `held` changes nothing here.
+    fn swap(&self, audio: Arc<AudioData>, place: &dyn Fn(f64) -> f64, _held: bool) -> bool {
         let key = PAGE.with(|p| p.borrow().play).to_string();
         player()
             .play_from(audio, key.clone(), |now| match now {
@@ -832,6 +833,8 @@ fn show(app: &AppWindow, showing: Showing) {
         save_note,
         save_detail,
         save_failed,
+        // The plugin's: its list shows the file's own waveform beside the strip. Here the card does that itself.
+        file_part: _,
         slices,
     } = showing;
     data.set_shown(open);

@@ -107,6 +107,9 @@ pub const PLUGIN_PARTS: &[Part] = &[
     part("plugin.folders", 280.0, 180.0, 480.0),
     // Chord check's list of takes.
     part("plugin.takes", 210.0, 160.0, 480.0),
+    // The Sounds view's Edit strip along the bottom of the panel: its height, dragged by its top edge. Lower than
+    // the app's to start with, as the panel opens smaller than the app's window.
+    part("plugin.edit", 284.0, 240.0, 900.0),
 ];
 
 /// The part called `name`, the app's or the plugin's, if there is one.
