@@ -10,7 +10,6 @@
 //! While the Slices are on, undo and redo step through the cuts, and the edit's own tools wait: the cuts are always of
 //! the edit as it is. Each sound's slicing is kept with its edits, so going to another sound and back finds it.
 
-use std::fmt::Write as _;
 use std::hash::{DefaultHasher, Hasher as _};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -19,16 +18,13 @@ use mo_audio::AudioData;
 use mo_audio::edit::{Edit, Span};
 use mo_audio::hits;
 
-use super::{Chip, History, Host, Made, Opened, Strip, carry, play_edit, show, stop, view};
+use super::{History, Host, Made, Opened, Strip, carry, play_edit, show, stop, view};
 use crate::edit_copy::{self, LEAST_SLICE_SECONDS, MOST_SLICES, Source};
 use crate::{sound_part, to_bitwig};
 
 /// The ids of the Slices' actions in the shortcut list. Saving them in their folder is the strip's own Save.
 pub const SLICES: &str = "sounds.editSlices";
 pub const TO_BITWIG: &str = "sounds.editSlicesBitwig";
-
-/// How many pads the strip's foot names before it skips to the last.
-const PADS_NAMED: usize = 8;
 
 /// How much further off than a press takes hold of a line a hit pulls a line to it: 8 px to the press's 5, as a picked
 /// part's edges.
@@ -43,8 +39,9 @@ const TO_NEXT_HIT: &str = "to its next hit";
 const TO_NEXT_CUT: &str = "to the next cut";
 const TO_END: &str = "to the sound's end";
 
-/// What the Send button says until there are slices to count.
+/// What the Send button says until there are slices to count, and the strip's foot until there are any.
 const SEND: &str = "Send the slices";
+const NO_SLICES: &str = "No slices yet";
 
 /// What the Send menu's folder line says until there are slices to count.
 const TO_FOLDER: &str = "A numbered folder";
@@ -254,6 +251,11 @@ pub struct Showing {
     pub pads: Vec<String>,
     pub to_folder_text: String,
     pub saved_in: String,
+    /// What the strip's foot says: the slice picked by its number ("Slice 5"), with how long it is and the pad it goes
+    /// on ("0.23 s · pad E1"). With none picked, no number, and the pads they all go on ("Pads C1 to G3"); "No slices
+    /// yet" until there are cuts.
+    pub foot_name: String,
+    pub foot_facts: String,
     /// A number that's another whenever the lines the mouse can take hold of are others (where the cuts are, and the
     /// stretch of the sound that's shown): what [`near`] says is asked again then, though the mouse hasn't moved.
     pub cuts_mark: i32,
@@ -280,6 +282,8 @@ impl Default for Showing {
             pads: Vec::new(),
             to_folder_text: TO_FOLDER.to_owned(),
             saved_in: String::new(),
+            foot_name: String::new(),
+            foot_facts: NO_SLICES.to_owned(),
             cuts_mark: 0,
         }
     }
@@ -769,38 +773,29 @@ pub(super) fn showing(o: &Opened, sending: bool) -> Showing {
     // Where they're saved: the folder this slicing has, by its name.
     let folder = edit_copy::slices_folder_name(&o.source, &format!("{:?}", made.edits), &spans(slicing, made));
     show.saved_in = format!("Saved in {}: {folder}", edit_copy::FOLDER);
+    (show.foot_name, show.foot_facts) = foot(o, slices);
     show
 }
 
-/// The pads as chips along the strip's foot: "1 → C1", "2 → C#1"…, the first few and then the last; the picked
-/// slice's is lit.
-pub(super) fn pad_chips(o: &Opened) -> Vec<Chip> {
-    let slices = now(o).map_or(0, |(slicing, _)| slicing.cuts.len());
-    let pad = |i: usize| format!("{} \u{2192} {}", i + 1, to_bitwig::slice_pad_name(i));
-    let mut chips: Vec<Chip> =
-        (0..slices.min(PADS_NAMED)).map(|i| Chip { text: pad(i), last: o.slice == Some(i) }).collect();
-    if slices > PADS_NAMED {
-        let last = slices - 1;
-        let lit = o.slice.is_some_and(|picked| picked >= PADS_NAMED);
-        let text = match o.slice.filter(|_| lit) {
-            // The one picked, when it's past those named.
-            Some(picked) if picked < last => format!("\u{2026} {} \u{2026} {}", pad(picked), pad(last)),
-            _ => format!("\u{2026} {}", pad(last)),
-        };
-        chips.push(Chip { text, last: lit });
+/// What the strip's foot says of the sound's `slices`: the one picked by its number, with how long it is and the pad
+/// it goes on ("Slice 5", "0.23 s · pad E1"); with none picked, the pads they all go on ("Pads C1 to G3").
+fn foot(o: &Opened, slices: usize) -> (String, String) {
+    if let (Some(slice), Some((from, till))) = (o.slice, picked(o)) {
+        let pad = to_bitwig::slice_pad_name(slice);
+        return (format!("Slice {}", slice + 1), format!("{} \u{b7} pad {pad}", sound_part::length_text(till - from)));
     }
-    chips
+    let facts = match slices {
+        0 => NO_SLICES.to_owned(),
+        1 => format!("Pad {}", to_bitwig::slice_pad_name(0)),
+        _ => format!("Pads {} to {}", to_bitwig::slice_pad_name(0), to_bitwig::slice_pad_name(slices - 1)),
+    };
+    (String::new(), facts)
 }
 
-/// The strip's heading with the Slices on: "20 slices · 2 bars", and the slice picked ("· slice 5 is 0.23 s"). How
-/// long the sound is, until it's sliced.
+/// The strip's heading with the Slices on: "20 slices · 2 bars". How long the sound is, until it's sliced.
 pub(super) fn heading(o: &Opened, seconds: f64) -> String {
     let Some((slicing, _)) = now(o) else { return sound_part::length_text(seconds) };
-    let mut text = format!("{} \u{b7} {}", to_bitwig::slices_text(slicing.cuts.len()), length_words(seconds, o.bpm));
-    if let (Some(slice), Some((from, till))) = (o.slice, picked(o)) {
-        let _ = write!(text, " \u{b7} slice {} is {}", slice + 1, sound_part::length_text(till - from));
-    }
-    text
+    format!("{} \u{b7} {}", to_bitwig::slices_text(slicing.cuts.len()), length_words(seconds, o.bpm))
 }
 
 /// How long a sound is, in whole bars when its tempo is known and it's as good as that ("2 bars"), else as the card
@@ -824,7 +819,7 @@ pub fn state_for_screens(strip: &Strip) -> (usize, Option<usize>) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Edits, make, stash};
+    use super::super::{make_of, stash};
     use super::*;
 
     fn slicing(cuts: &[f64]) -> Slicing {
@@ -833,7 +828,7 @@ mod tests {
 
     /// The edit of `audio` with `edits`, made, with its hits at `hits` (seconds, and how much each rises).
     fn made(audio: &AudioData, edits: &[Edit], hits: &[(f64, f32)]) -> Made {
-        Made { all_hits: hits.into(), ..make(audio, edits.to_vec()) }
+        Made { all_hits: hits.into(), ..make_of(audio, edits.to_vec()) }
     }
 
     /// A sound two seconds long, open in the strip and made: a big hit every half second, and a small one after the
@@ -843,24 +838,9 @@ mod tests {
         audio.file_seconds = audio.seconds();
         let hits = [(0.0, 40.0), (0.25, 8.0), (0.5, 20.0), (1.0, 20.0), (1.5, 20.0)];
         Opened {
-            id: 1,
-            source: Source { path: "a.wav".into(), span: None },
-            name: "a".into(),
-            colour: 0,
-            bpm: None,
             made: Some(made(&audio, &[], &hits)),
             original: Some(Arc::new(audio)),
-            changed: None,
-            note: String::new(),
-            edits: Edits::default(),
-            pick: None,
-            zoom: None,
-            dragging: None,
-            held: None,
-            pressed: false,
-            sliced: None,
-            slice: None,
-            slice_press: None,
+            ..Opened::new(1, Source { path: "a.wav".into(), span: None }, "a".into(), 0, None)
         }
     }
 
@@ -910,7 +890,7 @@ mod tests {
         let added = now(&o).unwrap().0.with_cut(0.25, 2.0).unwrap();
         o.sliced.as_mut().unwrap().history.change(added);
         o.sliced.as_mut().unwrap().on = false;
-        assert!(now(&o).is_none() && pad_chips(&o).is_empty());
+        assert!(now(&o).is_none() && !showing(&o, false).on);
         slices_on(&mut o);
         assert_eq!(cuts(&o), [0.0, 0.25, 0.5, 1.0, 1.5]);
         assert_eq!(steps(&o), (true, false), "and its steps for undo");
@@ -1135,36 +1115,35 @@ mod tests {
     }
 
     #[test]
-    fn the_foot_names_the_first_pads_and_the_last_and_the_heading_counts_the_slices() {
+    fn the_heading_counts_the_slices_and_the_foot_names_the_one_picked_and_its_pad() {
         let mut o = opened();
         // 120 BPM: two seconds is a bar.
         o.bpm = Some(120.0);
         slices_on(&mut o);
         let twenty = Slicing { cuts: (0..20).map(|i| f64::from(i) * 0.1).collect(), ..Slicing::default() };
         o.sliced.as_mut().unwrap().history.change(twenty);
-        let texts = |o: &Opened| pad_chips(o).iter().map(|c| c.text.clone()).collect::<Vec<_>>();
-        let lit = |o: &Opened| pad_chips(o).iter().position(|c| c.last);
-        let chips = texts(&o);
-        assert_eq!(chips.len(), PADS_NAMED + 1);
-        assert_eq!(chips[0], "1 \u{2192} C1");
-        assert_eq!(chips[7], "8 \u{2192} G1");
-        assert_eq!(chips[8], "\u{2026} 20 \u{2192} G2");
-        assert_eq!(lit(&o), None);
+        let foot = |o: &Opened| {
+            let show = showing(o, false);
+            (show.foot_name, show.foot_facts)
+        };
+        let said = |name: &str, facts: &str| (name.to_owned(), facts.to_owned());
+        // None picked: the pads they all go on.
         assert_eq!(heading(&o, 2.0), "20 slices \u{b7} 1 bar");
+        assert_eq!(foot(&o), said("", "Pads C1 to G2"));
+        // One picked: its number, how long it is and its pad. The heading stays as it is.
         o.slice = Some(4);
-        assert_eq!(lit(&o), Some(4));
-        assert_eq!(heading(&o, 2.0), "20 slices \u{b7} 1 bar \u{b7} slice 5 is 0.10 s");
-        // One picked past those named is named too, before the last.
-        o.slice = Some(12);
-        assert_eq!(texts(&o)[8], "\u{2026} 13 \u{2192} C2 \u{2026} 20 \u{2192} G2");
-        assert_eq!(lit(&o), Some(8));
+        assert_eq!(foot(&o), said("Slice 5", "0.10 s \u{b7} pad E1"));
+        assert_eq!(heading(&o, 2.0), "20 slices \u{b7} 1 bar");
+        // The last runs to the sound's end.
         o.slice = Some(19);
-        assert_eq!(texts(&o)[8], "\u{2026} 20 \u{2192} G2");
-        assert_eq!(lit(&o), Some(8));
-        // Few enough to name them all: no last one set apart.
-        let three = Slicing { cuts: vec![0.0, 0.5, 1.0], ..Slicing::default() };
-        o.sliced.as_mut().unwrap().history.change(three);
-        assert_eq!(texts(&o), ["1 \u{2192} C1", "2 \u{2192} C#1", "3 \u{2192} D1"]);
+        assert_eq!(foot(&o), said("Slice 20", "0.10 s \u{b7} pad G2"));
+        // One slice only, and none at all.
+        o.slice = None;
+        o.sliced.as_mut().unwrap().history.change(Slicing { cuts: vec![0.5], ..Slicing::default() });
+        assert_eq!(foot(&o), said("", "Pad C1"));
+        o.sliced.as_mut().unwrap().history.change(Slicing::default());
+        assert_eq!(foot(&o), said("", "No slices yet"));
+        assert_eq!(showing(&opened(), false).foot_facts, "No slices yet", "and with the Slices off");
     }
 
     #[test]

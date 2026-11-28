@@ -11,8 +11,8 @@ mod drag_out;
 mod edit_strip;
 pub use drag_out::card_at_row;
 pub use edit_strip::{
-    for_screens as edit_for_screens, slices_state_for_screens as edit_slices_for_screens,
-    state_for_screens as edit_state_for_screens,
+    for_screens as edit_for_screens, played_for_screens as edit_played_for_screens,
+    slices_state_for_screens as edit_slices_for_screens, state_for_screens as edit_state_for_screens,
 };
 pub use part::hits_for_screens;
 mod file_dates;
@@ -704,23 +704,33 @@ pub fn compute_here() {
     HERE.with(|h| *h.borrow_mut() = true);
 }
 
-/// A graphics card came (the window is up, or came back): the galaxy is drawn on it.
+/// A graphics card came (the window is up, or came back): the galaxy is drawn on it, and the tiles and the Edit
+/// strip's screen from now on.
 pub fn graphics_ready(app: &AppWindow) {
     galaxy::draw(app);
     grid::graphics_ready(app);
+    edit_strip::graphics_ready(app);
 }
 
-/// The graphics card went (the window closed, or the card was reset): the galaxy's and the tiles' painters go too, at
-/// once, even as the window itself goes.
+/// The graphics card went (the window closed, or the card was reset): the galaxy's, the tiles' and the Edit strip's
+/// painters go too, at once, even as the window itself goes.
 pub fn card_gone() {
     galaxy::painter_gone();
     grid::card_gone();
+    edit_strip::card_gone();
 }
 
-/// The graphics card went: the galaxy's picture on show goes too, and the tiles draw their own shapes.
+/// The graphics card went: the galaxy's picture on show goes too, the tiles draw their own shapes, and the Edit
+/// strip's screen is drawn again without it.
 pub fn graphics_gone(app: &AppWindow) {
     galaxy::card_gone(app);
     grid::graphics_gone(app);
+    edit_strip::graphics_gone(app);
+}
+
+/// The window's theme has new colours: the Edit strip's screen is drawn again in them.
+pub fn look_changed(app: &AppWindow) {
+    edit_strip::look_changed(app);
 }
 
 /// Wires the page and starts reading the sound library at `sounds_db` in the background, then how much your songs use

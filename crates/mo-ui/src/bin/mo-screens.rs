@@ -764,6 +764,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         save_narrow(&window, &out, name)?;
     }
     sounds.invoke_pick_view(0);
+    edit_narrow_shots(&app, &window, &out)?;
     app.set_place(Place::Songs.index() as i32);
 
     // The song panel, on the first song, on Overview and on Plugins.
@@ -5003,9 +5004,10 @@ fn part_shots(
     Ok(())
 }
 
-/// The Edit strip (E) along the bottom of Sounds (the 1.1 plan's light sample edits, mock-up 8): opened on a made-up
-/// drum loop with a fade in, a fade out and a normalise made, and two beats of it picked. Undo and redo step through
-/// the edits, and Esc lets the part go, then closes the strip.
+/// The Edit strip (E) along the bottom of Sounds (the 1.1 plan's light sample edits; its look is mock-up 12): opened
+/// on a made-up drum loop with a fade in, a fade out and a normalise made, and two beats of it picked and playing.
+/// Undo and redo step through the edits, and Esc lets the part go, then closes the strip. Then its other looks
+/// (mock-up 14), and its Slices.
 fn edit_shots(
     app: &mo_ui::AppWindow,
     window: &MinimalSoftwareWindow,
@@ -5033,7 +5035,32 @@ fn edit_shots(
     }
     hover(window, -1.0, -1.0);
     capture(window);
+    // The screen is a picture of the waveform, three times as high as the screen itself (as it is, dim and lit).
+    let picture = edit.get_wave_picture().size();
+    if picture.width < 600 || picture.height < 300 || picture.height % 3 != 0 {
+        return Err(format!("sounds-edit.png: the screen's picture is {} by {}", picture.width, picture.height));
+    }
+    // Play: the part plays from its start, and what has played of it is lit behind the play head (nothing really
+    // plays here, so the place it has got to is said by hand: a little over a beat in). Autoplay is on, so picking
+    // the sound played it: that's stopped first, or the strip's Play would only stop it.
+    mo_ui::sounds::stop_on_escape(app);
+    let part_from = f64::from(edit.get_view_from() + edit.get_pick_from() * edit.get_view_seconds());
+    if !mo_ui::sounds::toggle_play(app) || !edit.get_playing() {
+        return Err("sounds-edit.png: Play didn't play the part picked on the strip".into());
+    }
+    mo_ui::sounds::edit_played_for_screens(app, part_from + EDIT_PLAYED);
+    let (lit_from, head) = (edit.get_played_from(), edit.get_played());
+    if (lit_from - edit.get_pick_from()).abs() > 1e-3 || head <= lit_from || head >= edit.get_pick_to() {
+        return Err(format!("sounds-edit.png: the play is lit from {lit_from} to {head}, not inside the part picked"));
+    }
+    if edit.get_level_left() <= 0.0 || edit.get_peak_text().is_empty() {
+        return Err("sounds-edit.png: the meter shows no level as the part plays, or no loudest moment".into());
+    }
     shots.push(("sounds-edit.png".into(), capture(window)));
+    // Play again stops it, and nothing is lit any more.
+    if !mo_ui::sounds::toggle_play(app) || edit.get_playing() || edit.get_played() != 0.0 {
+        return Err("sounds-edit.png: Play again didn't stop the part".into());
+    }
     // Undo takes the last edit back, and redo makes it again.
     mo_ui::sounds::run_action(app, "sounds.editUndo");
     let undone = mo_ui::sounds::edit_state_for_screens().2;
@@ -5067,8 +5094,21 @@ fn edit_shots(
     for _ in 0..tools.len() {
         mo_ui::sounds::run_action(app, "sounds.editUndo");
     }
-    if edit.get_has_edits() || edit.get_can_undo() || !edit.get_can_redo() {
+    if edit.get_has_edits() || edit.get_can_undo() || !edit.get_can_redo() || edit.get_can_save() {
         return Err("sounds-edit.png: with every edit undone, Save copy still has something to save".into());
+    }
+    // The edits made again, for the strip's other looks; then all undone again, as the Slices' pictures find it.
+    for _ in 0..tools.len() {
+        mo_ui::sounds::run_action(app, "sounds.editRedo");
+    }
+    edit_look_shots(app, window, shots)?;
+    for _ in 0..MANY_EDITS {
+        if edit.get_can_undo() {
+            mo_ui::sounds::run_action(app, "sounds.editUndo");
+        }
+    }
+    if edit.get_has_edits() || edit.get_can_undo() {
+        return Err("sounds-edit-saved.png: undo didn't take back every edit the strip's looks made".into());
     }
     data.invoke_card_chosen("sounds.edit".into());
     slices_shots(app, window, shots)?;
@@ -5076,6 +5116,180 @@ fn edit_shots(
     pick_sound(app, 6);
     data.set_played(0.35);
     data.set_tile_played(0.35);
+    Ok(())
+}
+
+/// The Edit strip in the narrowest window the app allows, on the drum loop [`edit_shots`] leaves with a long list of
+/// edits: the keys are narrower, the sound's name and the tools that wait for the stretcher give way to them, the
+/// ruler counts every other beat, and the oldest of its four edits' chips run off the left. Then its Slices, whose
+/// choices take a row of their own under the tools.
+fn edit_narrow_shots(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    out: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let edit = app.global::<mo_ui::SoundEdit>();
+    let data = app.global::<mo_ui::SoundsData>();
+    let found = (0..64).any(|row| {
+        pick_sound(app, row);
+        data.get_picked().name == EDIT_SOUND
+    });
+    if !found {
+        return Err(format!("sounds-edit-narrow.png: no made-up sound called {EDIT_SOUND} to open the strip on").into());
+    }
+    mo_ui::sounds::stop_on_escape(app);
+    // Its long list of edits taken back, and four made (the strip's own picture's three, then turned down 3 dB: an
+    // edit that isn't the copy saved for that picture), with two beats picked.
+    mo_ui::sounds::edit_for_screens(app, drum_loop(), None, &[]);
+    for _ in 0..MANY_EDITS {
+        if edit.get_can_undo() {
+            mo_ui::sounds::run_action(app, "sounds.editUndo");
+        }
+    }
+    let tools = ["sounds.editFadeIn", "sounds.editFadeOut", "sounds.editNormalise"];
+    mo_ui::sounds::edit_for_screens(app, drum_loop(), None, &tools);
+    for _ in 0..6 {
+        edit.invoke_gain_stepped(-1);
+    }
+    mo_ui::sounds::edit_for_screens(app, drum_loop(), Some((0.25, 0.375)), &[]);
+    let edits = tools.len() + 1;
+    if !edit.get_shown() || edit.get_slicing() || edit.get_chips().row_count() != edits || !edit.get_has_part() {
+        return Err("sounds-edit-narrow.png: the strip isn't open on its four edits with a part picked".into());
+    }
+    if edit.get_saved() || !edit.get_can_save() || edit.get_peak_text() != "\u{2212}3.0" {
+        return Err(format!(
+            "sounds-edit-narrow.png: turned down 3 dB the edit's loudest moment reads \"{}\", or it has no copy to save",
+            edit.get_peak_text()
+        )
+        .into());
+    }
+    hover(window, -1.0, -1.0);
+    save_narrow(window, out, "sounds-edit-narrow.png")?;
+    // In the narrow window the ruler had room for fewer numbers; back in the usual one it counts every beat again.
+    capture(window);
+    if edit.get_ruler().row_count() != 17 {
+        let marks = edit.get_ruler().row_count();
+        return Err(format!("sounds-edit-narrow.png: back in the usual window the ruler has {marks} marks").into());
+    }
+    // The Slices: the part picked let go first, as they cut the whole edit.
+    mo_ui::sounds::escape(app);
+    edit.invoke_tool("sounds.editSlices".into());
+    if !edit.get_slicing() || edit.get_cuts().row_count() < 8 {
+        return Err("sounds-slices-narrow.png: the Slices aren't on".into());
+    }
+    save_narrow(window, out, "sounds-slices-narrow.png")?;
+    // As the page was, for the pictures after these: the Slices off, the edits taken back (each step of the gain is
+    // an undo of its own), the strip closed.
+    edit.invoke_tool("sounds.editSlices".into());
+    for _ in 0..MANY_EDITS {
+        if edit.get_can_undo() {
+            mo_ui::sounds::run_action(app, "sounds.editUndo");
+        }
+    }
+    if edit.get_slicing() || edit.get_has_edits() {
+        return Err("sounds-slices-narrow.png: the strip wasn't left as it was found".into());
+    }
+    data.invoke_card_chosen("sounds.edit".into());
+    mo_ui::sounds::stop_on_escape(app);
+    data.invoke_close_panel();
+    Ok(())
+}
+
+/// How far into the part picked the Edit strip's play has got for its picture (seconds): a little over a beat.
+const EDIT_PLAYED: f64 = 0.58;
+
+/// The Edit strip's waveform on its screen, in the usual window with the strip at its usual height: its left end,
+/// how wide it is, and how far down a waveform at full scale starts (where the fades' handles sit).
+const EDIT_WAVE: (f32, f32, f32) = (255.0, 1088.0, 644.0);
+
+/// How far left the fade out's handle is dragged for its picture.
+const EDIT_FADE_DRAG: f32 = 150.0;
+
+/// The Edit strip's other looks (mock-up 14), on the drum loop with its three edits and no part picked: the original
+/// held, a fade's handle dragged, an edit turned up too loud, and a copy saved.
+fn edit_look_shots(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    shots: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), String> {
+    let edit = app.global::<mo_ui::SoundEdit>();
+    hover(window, -1.0, -1.0);
+    let plain = capture(window);
+    // O held (A on the switch): the original is heard and seen, as it was, in grey, lit where it has played.
+    edit.invoke_hear_original(true);
+    mo_ui::sounds::edit_played_for_screens(app, 2.6);
+    if !edit.get_original() || !edit.get_playing() || edit.get_played() <= 0.0 {
+        return Err("sounds-edit-original.png: holding O didn't play the original".into());
+    }
+    capture(window);
+    shots.push(("sounds-edit-original.png".into(), capture(window)));
+    edit.invoke_hear_original(false);
+    if edit.get_original() || edit.get_playing() {
+        return Err("sounds-edit-original.png: letting O go didn't stop the original".into());
+    }
+    // A fade's handle dragged with the mouse: the sound changes shape under it, how it was stays as a faint outline,
+    // and the fade's length counts along beside the handle. Let go, it's one edit, and one step for undo.
+    let (left, wide, top) = EDIT_WAVE;
+    let button = slint::platform::PointerEventButton::Left;
+    let handle = slint::LogicalPosition::new(left + edit.get_fade_out() * wide, top);
+    let to = slint::LogicalPosition::new(handle.x - EDIT_FADE_DRAG, top + 6.0);
+    let was = edit.get_fade_out();
+    window.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: handle });
+    window.dispatch_event(slint::platform::WindowEvent::PointerPressed { position: handle, button });
+    window.dispatch_event(slint::platform::WindowEvent::PointerMoved { position: to });
+    capture(window);
+    let held = capture(window);
+    let (now, text) = (edit.get_fade_out(), edit.get_fade_text());
+    window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position: to, button });
+    hover(window, -1.0, -1.0);
+    if now >= was || !text.starts_with("Fade out") {
+        return Err(format!(
+            "sounds-edit-fade.png: dragging the fade out's handle from {handle:?} moved it from {was} to {now} and \
+             said \"{text}\"; has it moved?"
+        ));
+    }
+    if !edit.get_fade_text().is_empty() || capture(window) == plain {
+        return Err("sounds-edit-fade.png: the fade's length stayed up once its handle was let go, or no fade".into());
+    }
+    shots.push(("sounds-edit-fade.png".into(), held));
+    mo_ui::sounds::run_action(app, "sounds.editUndo");
+    if (edit.get_fade_out() - was).abs() > 1e-4 {
+        return Err("sounds-edit-fade.png: the fade dragged wasn't one step for undo".into());
+    }
+    // Too loud: turned up 6 dB past full scale, its tops are red, the gain is amber and the meter shows over.
+    for _ in 0..12 {
+        edit.invoke_gain_stepped(1);
+    }
+    if !edit.get_too_loud() || !edit.get_over() || edit.get_peak_text() != "+6.0" {
+        return Err(format!(
+            "sounds-edit-loud.png: 6 dB over full scale reads \"{}\" on the meter (too loud: {}, over: {})",
+            edit.get_peak_text(),
+            edit.get_too_loud(),
+            edit.get_over()
+        ));
+    }
+    capture(window);
+    shots.push(("sounds-edit-loud.png".into(), capture(window)));
+    edit.invoke_gain_reset();
+    if edit.get_too_loud() || edit.get_over() || edit.get_gain_changed() {
+        return Err("sounds-edit-loud.png: the gain put back left the edit too loud".into());
+    }
+    // Saved: the button says so, with the copy's name beside it (nothing is written here). Another edit, and there's
+    // a copy to save again.
+    mo_ui::sounds::run_action(app, "sounds.editSave");
+    if !edit.get_saved() || edit.get_save_note() != "Saved in Edited sounds" || edit.get_save_detail().is_empty() {
+        return Err(format!(
+            "sounds-edit-saved.png: Save copy left the button saying \"{}\" beside \"{}\"",
+            edit.get_save_text(),
+            edit.get_save_note()
+        ));
+    }
+    capture(window);
+    shots.push(("sounds-edit-saved.png".into(), capture(window)));
+    mo_ui::sounds::run_action(app, "sounds.editReverse");
+    if edit.get_saved() || !edit.get_save_note().is_empty() || !edit.get_can_save() {
+        return Err("sounds-edit-saved.png: after another edit the strip still says its copy is saved".into());
+    }
     Ok(())
 }
 
@@ -5129,6 +5343,11 @@ fn slices_shots(
         || !edit.get_has_part()
     {
         return Err("sounds-slices.png: a click in the fifth slice didn't pick it".into());
+    }
+    // The strip's foot names it, with how long it is and the pad it goes on.
+    if edit.get_slice_name() != "Slice 5" || !edit.get_slice_facts().ends_with("pad E1") {
+        let (name, facts) = (edit.get_slice_name(), edit.get_slice_facts());
+        return Err(format!("sounds-slices.png: with the fifth slice picked the foot says \"{name}\", \"{facts}\""));
     }
     hover(window, -1.0, -1.0);
     capture(window);
@@ -5226,6 +5445,9 @@ fn slices_shots(
     if !mo_ui::sounds::escape(app) || mo_ui::sounds::edit_slices_for_screens().1.is_some() || !edit.get_slicing() {
         return Err("sounds-slices.png: Esc didn't let the slice picked go first".into());
     }
+    if !edit.get_slice_name().is_empty() || !edit.get_slice_facts().starts_with("Pads C1 to ") {
+        return Err(format!("sounds-slices.png: with no slice picked the foot says \"{}\"", edit.get_slice_facts()));
+    }
     if !mo_ui::sounds::escape(app) || edit.get_slicing() || !edit.get_shown() {
         return Err("sounds-slices.png: a second Esc didn't turn the Slices off and leave the strip open".into());
     }
@@ -5259,10 +5481,10 @@ fn slices_shots(
     Ok(())
 }
 
-/// The Edit strip's Send button with the Slices on, near its right end (however wide its words make it), and a place
-/// on the strip's heading where a click does nothing but close a menu.
-const SLICES_SEND: (f32, f32) = (1380.0, 628.0);
-const SLICES_AWAY: (f32, f32) = (640.0, 588.0);
+/// The Edit strip's Send button with the Slices on, at the right end of the strip's foot, and a place on the sound's
+/// name in the strip's row of tools, where a click does nothing but close a menu.
+const SLICES_SEND: (f32, f32) = (1319.0, 854.0);
+const SLICES_AWAY: (f32, f32) = (380.0, 591.0);
 
 /// Enough edits that their chips are wider than the Edit strip.
 const MANY_EDITS: usize = 40;
