@@ -1,5 +1,5 @@
 //! The widths of the plugin's parts you can drag wider or narrower ([`mo_app::widths::PLUGIN_PARTS`]): the filter
-//! column, the folder tree and Chord check's takes. Kept in a small file of the plugin's own in the app's data folder
+//! column, the folder tree, Chord check's takes, and how high the Edit strip is. Kept in a small file of the plugin's own in the app's data folder
 //! (the plugin never writes the app's settings), shared by every copy of the plugin: a window opened later, in any
 //! project, comes up as you left the last one.
 //!
@@ -219,6 +219,8 @@ fn give(panel: &Panel, name: &str, width: f32) {
         "plugin.filters" => data.set_plugin_filters(width),
         "plugin.folders" => data.set_plugin_folders(width),
         "plugin.takes" => data.set_plugin_takes(width),
+        // The strip is the app's own, and reads its height where the app's page keeps it.
+        "plugin.edit" => data.set_sounds_edit(width),
         _ => debug_assert!(false, "the plugin has no part called {name}"),
     }
 }

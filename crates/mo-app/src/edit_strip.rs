@@ -571,6 +571,12 @@ pub struct Showing {
     pub save_note: String,
     pub save_detail: String,
     pub save_failed: bool,
+    /// The part of the sound's own file the strip is on, from and to as shares of the file (0 its start, 1 its end),
+    /// for a host that shows the file's own waveform beside the strip (the plugin's list): where the part picked came
+    /// from, through the edits (the slice picked, with the Slices on); with none picked, where the edit as a whole
+    /// did, when a trim or a loop keeps less than all of the file. None when it's the whole file; and none for a long
+    /// sound only a part of which was read, as how long its file is isn't known here.
+    pub file_part: Option<(f32, f32)>,
     /// The Slices.
     pub slices: slices::Showing,
 }
@@ -623,6 +629,7 @@ impl Default for Showing {
             save_note: String::new(),
             save_detail: String::new(),
             save_failed: false,
+            file_part: None,
             slices: slices::Showing::default(),
         }
     }
@@ -725,23 +732,38 @@ pub fn open(host: &dyn Host) -> bool {
 
 /// Closes the strip. Its sound's edits are kept; what was read is let go.
 pub fn close(host: &dyn Host) {
-    let was_open = {
-        let mut s = host.strip().borrow_mut();
-        let was = s.open;
-        s.open = false;
-        stash(&mut s);
-        s.asked += 1;
-        // A save that failed is past once the strip is closed.
-        if s.copy.as_ref().is_some_and(|c| matches!(c.state, CopyState::Failed(_))) {
-            s.copy = None;
-        }
-        was
-    };
+    let was_open = shut(&mut host.strip().borrow_mut());
     if !was_open {
         return;
     }
     stop(host);
     show(host);
+}
+
+/// [`close`]'s step on the strip itself, with nothing told or shown: whether it was open.
+fn shut(s: &mut Strip) -> bool {
+    let was_open = s.open;
+    s.open = false;
+    stash(s);
+    s.asked += 1;
+    // A save that failed is past once the strip is closed.
+    if s.copy.as_ref().is_some_and(|c| matches!(c.state, CopyState::Failed(_))) {
+        s.copy = None;
+    }
+    was_open
+}
+
+/// Puts the strip away when its host goes and another will take it up (the plugin's window closes, and the strip waits
+/// for the next one): closed, each sound's edits kept, and nothing left that was the old host's. That's the room its
+/// screen had and the waveform shown there; and a save or a send still on its way, whose answer has nobody to come
+/// back to (it's finished all the same: the copy is made, and Save finds it there the next time).
+pub fn put_away(strip: &mut Strip) {
+    shut(strip);
+    (strip.room, strip.columns, strip.wave) = (None, None, None);
+    if strip.copy.as_ref().is_some_and(|c| matches!(c.state, CopyState::Saving)) {
+        strip.copy = None;
+    }
+    strip.sending = None;
 }
 
 /// Stops the strip's own play, if that's what plays (a right-click on its waveform; the strip closing).
@@ -1445,12 +1467,15 @@ pub fn key_up(host: &dyn Host, name: &str) {
 
 /// Where the strip's play has got to, for its host to show: the play head and where the play started (both across
 /// what the strip's waveform shows, 0 to 1 while they're in sight and outside that while they aren't; what's between
-/// them is lit), and how far up the meter each side is lit.
+/// them is lit), and how far up the meter each side is lit. And where the moment heard is in the sound's own file (0
+/// its start, 1 its end), for a host that shows the file's own waveform too ([`Showing::file_part`]): where it came
+/// from, through the edits; none for a long sound only a part of which was read.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Playing {
     pub at: f32,
     pub from: f32,
     pub level: [f32; 2],
+    pub in_file: Option<f32>,
 }
 
 /// What a tick of the host's ticker comes to, while the strip's play plays ([`tick`]).
@@ -1474,16 +1499,22 @@ pub fn tick(strip: &mut Strip, at: Option<f64>, till: Option<f64>) -> Ticked {
     let (from, to) = view(o);
     let (Some(made), Some(original)) = (o.made.as_ref(), o.original.as_ref()) else { return Ticked::Waiting };
     let held = o.held.is_some();
+    let rate = f64::from(original.sample_rate.max(1));
+    let frame = (at * rate).round() as usize;
     // What's heard, and where that is in the edit: hearing the original, where the moment it has got to went.
     let (heard, place) = if held {
-        let rate = f64::from(original.sample_rate.max(1));
-        (original, edit::place_after(original.len(), &made.edits, (at * rate).round() as usize) as f64 / rate)
+        (original, edit::place_after(original.len(), &made.edits, frame) as f64 / rate)
     } else {
         (&made.audio, at)
     };
     if !held && till.is_some_and(|till| place >= till) {
         return Ticked::Ended;
     }
+    // And in the sound's own file: the original is that file, read whole; the edit's moment came from somewhere in it.
+    let in_file = o.source.span.is_none().then(|| {
+        let from = if held { frame } else { edit::place_before(original.len(), &made.edits, frame) };
+        (from as f64 / original.len().max(1) as f64).clamp(0.0, 1.0) as f32
+    });
     // A play whose start wasn't seen is lit from here on.
     let played = o.played.get_or_insert(Played::starting(place));
     // The meter: as loud as what has played since the last tick gets, or falling back from where it was.
@@ -1496,7 +1527,7 @@ pub fn tick(strip: &mut Strip, at: Option<f64>, till: Option<f64>) -> Ticked {
     played.last = Some(at);
     played.place = place;
     let across = |t: f64| across(t, (from, to));
-    Ticked::At(Playing { at: across(place), from: across(played.from), level: played.level })
+    Ticked::At(Playing { at: across(place), from: across(played.from), level: played.level, in_file })
 }
 
 /// Where the moment `t` is across a stretch on show (from and to, all in seconds): 0 to 1 inside it, and no further
@@ -1723,6 +1754,7 @@ fn showing(s: &mut Strip, plays: bool) -> Showing {
         return show;
     };
     show.ready = o.note.is_empty();
+    show.file_part = file_part(o, original, made);
     let held = o.held.is_some();
     let seconds = made.audio.seconds();
     let (from, to) = view(o);
@@ -1820,6 +1852,25 @@ fn showing(s: &mut Strip, plays: bool) -> Showing {
     *wave = Some(next.clone());
     show.wave = Some(next);
     show
+}
+
+/// [`Showing::file_part`] for the sound `o`, read as `original` and edited to `made`.
+fn file_part(o: &Opened, original: &AudioData, made: &Made) -> Option<(f32, f32)> {
+    if o.source.span.is_some() {
+        return None;
+    }
+    let (frames, rate) = (original.len(), f64::from(original.sample_rate.max(1)));
+    let part = match part_now(o) {
+        Some((from, to)) => Span::new((from * rate).round() as usize, (to * rate).round() as usize),
+        None => Span { start: 0, end: made.audio.len() },
+    };
+    let from = edit::came_from(frames, &made.edits, part)?;
+    // All of the file: there's no part of it to mark.
+    if from.start == 0 && from.end >= frames {
+        return None;
+    }
+    let share = |frame: usize| (frame as f64 / frames.max(1) as f64) as f32;
+    Some((share(from.start), share(from.end)))
 }
 
 /// The waveform's columns for the sound `o` (read as `original`, its edit `made`) over the stretch on show, a column
@@ -2463,6 +2514,92 @@ mod tests {
         // Stopped: the meter is back at the edit's loudest, and nothing is lit.
         assert_eq!(showing(&mut s, false).levels.level, [1.0; 2]);
         assert!(s.sound.as_ref().unwrap().played.is_none());
+    }
+
+    #[test]
+    fn the_part_the_strip_is_on_is_found_in_the_sounds_own_file() {
+        let near = |part: Option<(f32, f32)>, (from, to): (f32, f32)| {
+            let (a, b) = part.expect("a part of the file");
+            assert!((a - from).abs() < 1e-6 && (b - to).abs() < 1e-6, "{a} to {b}, not {from} to {to}");
+        };
+        // No edits and nothing picked: all of the file, so there's no part of it to mark.
+        let mut s = strip(1_000, Vec::new());
+        assert_eq!(showing(&mut s, false).file_part, None);
+        // A part picked: that part of the file.
+        s.sound.as_mut().unwrap().pick = Some((0.25, 0.5));
+        near(showing(&mut s, false).file_part, (0.25, 0.5));
+        // Trimmed to its second half: the edit is that half of the file, and a part picked in it is as far in again.
+        let mut s = strip(1_000, vec![Edit::Trim(Span::new(500, 1_000))]);
+        near(showing(&mut s, false).file_part, (0.5, 1.0));
+        s.sound.as_mut().unwrap().pick = Some((0.1, 0.2));
+        near(showing(&mut s, false).file_part, (0.6, 0.7));
+        // And then played backwards: the part came from the other end of what the trim kept.
+        let mut s = strip(1_000, vec![Edit::Trim(Span::new(500, 1_000)), Edit::Reverse(None)]);
+        s.sound.as_mut().unwrap().pick = Some((0.1, 0.2));
+        near(showing(&mut s, false).file_part, (0.8, 0.9));
+        // A gain or a fade moves nothing: still all of the file.
+        let mut s = strip(1_000, vec![Edit::Gain { db: -3.0, span: None }]);
+        assert_eq!(showing(&mut s, false).file_part, None);
+        // Only a part of a long sound was read: where that is in its file isn't the strip's to say.
+        s.sound.as_mut().unwrap().pick = Some((0.1, 0.2));
+        s.sound.as_mut().unwrap().source.span = Some((30.0, 31.0));
+        assert_eq!(showing(&mut s, false).file_part, None);
+        // Nothing read yet: nothing to say.
+        s.sound.as_mut().unwrap().made = None;
+        assert_eq!(showing(&mut s, false).file_part, None);
+    }
+
+    #[test]
+    fn the_play_is_found_in_the_sounds_own_file_too() {
+        let in_file = |s: &mut Strip, at: f64| match tick(s, Some(at), None) {
+            Ticked::At(playing) => playing.in_file,
+            other => panic!("it plays: {other:?}"),
+        };
+        // The second half of the file, backwards: a tenth of a second into the edit is its frame 100, which was frame
+        // 399 of the half the trim kept, and 899 of the file.
+        let mut s = strip(1_000, vec![Edit::Trim(Span::new(500, 1_000)), Edit::Reverse(None)]);
+        assert!((in_file(&mut s, 0.1).expect("in the file") - 0.899).abs() < 1e-6);
+        // The original held: what plays is the file itself.
+        s.sound.as_mut().unwrap().held = Some(true);
+        assert!((in_file(&mut s, 0.1).expect("in the file") - 0.1).abs() < 1e-6);
+        // Past its end is its end.
+        assert_eq!(in_file(&mut s, 7.0), Some(1.0));
+        // Only a part of a long sound was read: there's nowhere in its file to say.
+        s.sound.as_mut().unwrap().source.span = Some((30.0, 31.0));
+        assert_eq!(in_file(&mut s, 0.1), None);
+    }
+
+    #[test]
+    fn a_strip_put_away_keeps_its_edits_and_nothing_of_the_host_it_had() {
+        let host = Fake::on(strip(1_000, vec![Edit::Reverse(None)]));
+        show(&host);
+        assert!(host.strip.borrow().wave.is_some());
+        // A copy saved, and then another on its way as the host goes.
+        assert_eq!(run_action(&host, SAVE), Some(true));
+        saved(&host, 1, Ok("Edited sounds/a (edit 1f).wav".into()));
+        let mut s = host.strip.take();
+        let asked = s.asked;
+        put_away(&mut s);
+        assert!(!s.open && s.sound.is_none());
+        assert!(s.room.is_none() && s.columns.is_none() && s.wave.is_none());
+        // Its edits wait with the kept ones, and an answer still on its way for the old host is nobody's.
+        assert_eq!(s.kept.len(), 1);
+        assert_eq!(s.kept[0].edits.now, [Edit::Reverse(None)]);
+        assert!(s.asked > asked);
+        // The copy that was saved is still known as saved; one still being saved isn't waited for.
+        assert!(s.copy.as_ref().is_some_and(|c| matches!(c.state, CopyState::Saved(_))));
+        s.copy.as_mut().unwrap().state = CopyState::Saving;
+        put_away(&mut s);
+        assert!(s.copy.is_none());
+        // Put away again, or with nothing in it: nothing to do.
+        put_away(&mut Strip::default());
+    }
+
+    /// The plugin keeps the strip from one window to the next, on whichever thread the DAW opens each on.
+    #[test]
+    fn a_strip_can_wait_for_its_next_host_on_another_thread() {
+        fn sendable<T: Send>() {}
+        sendable::<Strip>();
     }
 
     /// A host that only keeps what it's asked.

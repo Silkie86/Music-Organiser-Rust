@@ -455,6 +455,37 @@ pub fn place_after(frames: usize, edits: &[Edit], at: usize) -> usize {
     at
 }
 
+/// The stretch of the sound before `edits` (`frames` long) that the frames `span` of the sound they make came from:
+/// the shortest that holds where every one of them did ([`place_before`]). Through a trim or a loop it's as far in
+/// again as they started; a reverse that holds all of it only turns it round, and one that reaches part way into it
+/// brings frames in from further off, so it widens to hold those too. None when nothing of `span` is in the sound.
+pub fn came_from(frames: usize, edits: &[Edit], span: Span) -> Option<Span> {
+    let lengths = lengths(frames, edits);
+    let mut at = span.within(lengths.last().copied().unwrap_or(frames))?;
+    for (edit, &n) in edits.iter().zip(&lengths).rev() {
+        let whole = Span { start: 0, end: n };
+        let moved = move |by: Span| Span { start: at.start + by.start, end: at.end + by.start };
+        at = match *edit {
+            Edit::Trim(span) => span.within(n).map_or(at, moved),
+            Edit::LoopCrossfade { span, .. } => span.unwrap_or(whole).within(n).map_or(at, moved),
+            Edit::Reverse(span) => match span.unwrap_or(whole).within(n) {
+                // What's inside the reverse came from its mirror there; what's either side of it stayed.
+                Some(r) if at.start < r.end && at.end > r.start => {
+                    let (first, past) = (at.start.max(r.start), at.end.min(r.end));
+                    Span {
+                        start: if at.start < r.start { at.start } else { r.start + r.end - past },
+                        end: if at.end > r.end { at.end } else { r.start + r.end - first },
+                    }
+                }
+                _ => at,
+            },
+            _ => at,
+        };
+        at = Span { start: at.start.min(n), end: at.end.min(n) };
+    }
+    Some(at)
+}
+
 /// Frame `at` of a sound `n` long, after (or before) `span` of it (all of it for `None`) is reversed.
 fn mirrored(span: Option<Span>, n: usize, at: usize) -> usize {
     match span.unwrap_or(Span { start: 0, end: n }).within(n) {
@@ -769,5 +800,45 @@ mod tests {
         // No edits: where it was.
         assert_eq!(place_before(a.len(), &[], 123), 123);
         assert_eq!(place_after(a.len(), &[], 123), 123);
+    }
+
+    #[test]
+    fn the_stretch_a_part_of_the_edit_came_from_holds_every_frame_of_it_and_no_more() {
+        let frames = 240;
+        let lists: [&[Edit]; 6] = [
+            &[],
+            &[Edit::Trim(Span::new(40, 200))],
+            &[Edit::Reverse(None), Edit::Gain { db: -3.0, span: None }],
+            // A reverse inside a part, one over its edge, and one past it.
+            &[Edit::Trim(Span::new(20, 220)), Edit::Reverse(Some(Span::new(50, 90))), Edit::Normalise { peak_db: 0.0 }],
+            &[
+                Edit::Reverse(Some(Span::new(10, 120))),
+                Edit::LoopCrossfade { span: Some(Span::new(30, 200)), frames: 8 },
+                Edit::Reverse(Some(Span::new(100, 160))),
+                Edit::Trim(Span::new(5, 150)),
+            ],
+            &[
+                Edit::LoopCrossfade { span: None, frames: 16 },
+                Edit::Fade { span: Span::new(0, 9), way: Way::In, curve: Curve::Linear },
+            ],
+        ];
+        for edits in lists {
+            let after = lengths(frames, edits).last().copied().unwrap();
+            for start in (0..after).step_by(7) {
+                for end in (start + 1..=after).step_by(5) {
+                    let places = (start..end).map(|at| place_before(frames, edits, at));
+                    let (first, last) = places.fold((usize::MAX, 0), |(a, b), p| (a.min(p), b.max(p)));
+                    let from = came_from(frames, edits, Span { start, end });
+                    assert_eq!(from, Some(Span { start: first, end: last + 1 }), "{start}..{end} of {edits:?}");
+                }
+            }
+            // Nothing of it in the sound: nowhere. Reaching past the end: what there is of it.
+            assert_eq!(came_from(frames, edits, Span { start: after, end: after + 10 }), None);
+            assert_eq!(came_from(frames, edits, Span { start: 3, end: 3 }), None);
+            assert_eq!(
+                came_from(frames, edits, Span { start: 0, end: after + 10 }),
+                came_from(frames, edits, Span { start: 0, end: after })
+            );
+        }
     }
 }

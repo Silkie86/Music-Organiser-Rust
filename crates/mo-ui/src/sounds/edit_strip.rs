@@ -832,6 +832,8 @@ fn show(app: &AppWindow, showing: Showing) {
         save_note,
         save_detail,
         save_failed,
+        // The plugin's: its list shows the file's own waveform beside the strip. Here the card does that itself.
+        file_part: _,
         slices,
     } = showing;
     data.set_shown(open);

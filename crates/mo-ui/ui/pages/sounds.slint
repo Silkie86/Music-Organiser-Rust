@@ -2773,6 +2773,7 @@ export component SoundsPage inherits Rectangle {
         }
         // The Edit strip (E), along the bottom: the list and the card stay usable above it.
         if SoundEdit.shown: EditStrip {
+            part: "sounds.edit";
             most-height: root.height - 360px;
         }
     }
