@@ -43,6 +43,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+      # A slip in the script would quietly check less than it should, so its own checks come first (no time at all).
+      - name: The scope script's own checks
+        run: python3 tools/dev/ci_scope.py --check
       - id: scope
         env:
           BASE: ${{ github.base_ref }}
