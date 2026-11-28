@@ -157,16 +157,7 @@ fn differences(save: &Arrangement, copy: &Arrangement, grid: Grid) -> Vec<String
             && (x.2 == y.2 || x.2 == -1)
             && (soft(x.3) - soft(y.3)).abs() <= 65_535 / 256 + 1
     };
-    // Each of the save's notes matched with one of the copy's (a step note's length can't be sorted by).
-    let mut unused = b.clone();
-    let all_found = a.iter().all(|x| match unused.iter().position(|y| near(x, y)) {
-        Some(i) => {
-            unused.swap_remove(i);
-            true
-        }
-        None => false,
-    });
-    if a.len() != b.len() || !all_found {
+    if a.len() != b.len() || !all_paired(&a, &b, near) {
         out.push(format!("notes: {} became {}; first apart: {:?}", a.len(), b.len(), first_apart(&a, &b)));
     }
     let (a, b) = (note_clips(save, grid), note_clips(copy, grid));
@@ -191,9 +182,87 @@ fn differences(save: &Arrangement, copy: &Arrangement, grid: Grid) -> Vec<String
     out
 }
 
+/// Whether each of the save's notes can have a note of the copy's that's near it, no two the same one. A step note
+/// is near a note of any length, so the first near one isn't always the one to take: where notes share a place and a
+/// key, the pairing that leaves none out is looked for. Both lists are sorted, so a note's near ones start at its tick.
+fn all_paired(a: &[Note], b: &[Note], near: impl Fn(&Note, &Note) -> bool) -> bool {
+    let may_take: Vec<Vec<usize>> = a
+        .iter()
+        .map(|x| {
+            let from = b.partition_point(|y| y.0 < x.0);
+            (from..b.len()).take_while(|&j| b[j].0 == x.0).filter(|&j| near(x, &b[j])).collect()
+        })
+        .collect();
+    let mut taken_by = vec![None; b.len()];
+    let mut tried = vec![false; b.len()];
+    (0..a.len()).all(|i| {
+        tried.fill(false);
+        takes_one(i, &may_take, &mut taken_by, &mut tried)
+    })
+}
+
+/// Gives the save's note `i` one of the copy's notes it may take: a free one, or one whose holder can take another.
+fn takes_one(i: usize, may_take: &[Vec<usize>], taken_by: &mut [Option<usize>], tried: &mut [bool]) -> bool {
+    for &j in &may_take[i] {
+        if std::mem::replace(&mut tried[j], true) {
+            continue;
+        }
+        let free = match taken_by[j] {
+            Some(holder) => takes_one(holder, may_take, taken_by, tried),
+            None => true,
+        };
+        if free {
+            taken_by[j] = Some(i);
+            return true;
+        }
+    }
+    false
+}
+
 fn first_apart<T: std::fmt::Debug + PartialEq>(a: &[T], b: &[T]) -> String {
     let at = a.iter().zip(b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
     format!("{:?} vs {:?}", a.get(at), b.get(at))
+}
+
+/// Two notes in one place on one key, one of them a step: each is paired with its own copy. A step note pairs with
+/// any length, and it once took the other note's copy, which left that note with none: the check on random songs
+/// failed whenever a song had such a pair (a run on GitHub found one, 2026-11-28).
+#[test]
+fn a_step_note_and_a_note_in_one_place_are_each_paired_with_their_own_copy() {
+    let note = |length: f64, velocity: u16, step: bool| PreviewNote {
+        start: 1.0,
+        length,
+        key: 60,
+        velocity,
+        muted: false,
+        step,
+        part: 0,
+    };
+    let clip = |notes: Vec<PreviewNote>, parts: Vec<String>| PreviewClip {
+        start: 4.0,
+        length: 8.0,
+        notes,
+        parts,
+        ..PreviewClip::default()
+    };
+    let mut drums = PreviewLane::new("Drums", LaneKind::Instrument);
+    drums.clips = vec![clip(vec![note(2.0, 33_867, true)], vec!["Kick".into()])];
+    let mut keys = PreviewLane::new("Keys", LaneKind::Instrument);
+    keys.clips = vec![clip(vec![note(0.25, 33_611, false)], Vec::new())];
+    let song = Arrangement {
+        view: "made up",
+        tempo: 120.0,
+        signature: TimeSignature::new(4, 4).unwrap(),
+        lanes: vec![drums, keys],
+        markers: Vec::new(),
+        notes: Vec::new(),
+    };
+    let copy = s1::write(&song, "Copy", &any_format);
+    let back = arrangement::read_bytes(Path::new("x.song"), &copy.bytes);
+    // The step is listed first of the save's two (its length isn't compared), and last of the copy's (it's the longer).
+    let lengths = |song: &Arrangement| notes(song, FINE).iter().map(|n| n.2).collect::<Vec<_>>();
+    assert_eq!((lengths(&song), lengths(&back[0])), (vec![-1, 240], vec![240, 1920]));
+    assert_eq!(differences(&song, &back[0], FINE), Vec::<String>::new());
 }
 
 #[test]
