@@ -1,31 +1,31 @@
-//! The Edit strip's Slices (slice to pads: the 1.1 plan's light sample edits, mock-up 9, Solomon's "Build as shown" of
-//! 27 Nov 2026). The scissors (Alt+S) cut the edit at its hits, as big as the Sensitivity asks, or on the beats of a
-//! sound whose tempo is known: a line at each cut, the slices numbered from 1. A line is dragged to move it (it snaps
-//! to the hits; Shift for none); a double-click takes a line away, or adds one where there's none. A click in a slice
-//! plays it, and a press in one that moves carries that slice out of the app. Send puts the slices, each a file of its
-//! own in a folder for this slicing in the export folder's Edited sounds ([`edit_copy::slices_to_keep`]), on a Drum
-//! Machine in Bitwig, one to a pad from C1 (the Kits' way in), or just opens their folder.
+//! The Edit strip's Slices with no screen (slice to pads: the 1.1 plan's light sample edits, mock-up 9, Solomon's
+//! "Build as shown" of 27 Nov 2026). The scissors (Alt+S) cut the edit at its hits, as big as the Sensitivity asks, or
+//! on the beats of a sound whose tempo is known: a line at each cut, the slices numbered from 1. A line is dragged to
+//! move it (it snaps to the hits; Shift for none); a double-click takes a line away, or adds one where there's none.
+//! A click in a slice plays it, and a press in one that moves carries that slice out of the app. Send hands the
+//! slices to the strip's host ([`Host::send`]), which puts each in a file of its own in a folder for this slicing in
+//! the export folder's Edited sounds ([`edit_copy::slices_to_keep`]) and then on a Drum Machine in Bitwig, one to a
+//! pad from C1 (the Kits' way in), or just opens their folder.
 //!
 //! While the Slices are on, undo and redo step through the cuts, and the edit's own tools wait: the cuts are always of
 //! the edit as it is. Each sound's slicing is kept with its edits, so going to another sound and back finds it.
 
 use std::fmt::Write as _;
 use std::hash::{DefaultHasher, Hasher as _};
-use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
+use std::time::SystemTime;
 
-use mo_app::edit_copy::{self, LEAST_SLICE_SECONDS, MOST_SLICES};
-use mo_app::{background, log, to_bitwig};
-use mo_audio::edit::Edit;
+use mo_audio::AudioData;
+use mo_audio::edit::{Edit, Span};
 use mo_audio::hits;
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
-use super::super::{FEED, HERE, PAGE, did, kit, part};
-use super::{History, Made, Opened, STRIP, carry, play_edit, view};
-use crate::{AppWindow, EditChip, SliceCut, SoundEdit};
+use super::{Chip, History, Host, Made, Opened, Strip, carry, play_edit, show, stop, view};
+use crate::edit_copy::{self, LEAST_SLICE_SECONDS, MOST_SLICES, Source};
+use crate::{sound_part, to_bitwig};
 
 /// The ids of the Slices' actions in the shortcut list. Saving them in their folder is the strip's own Save.
-pub(super) const SLICES: &str = "sounds.editSlices";
-pub(super) const TO_BITWIG: &str = "sounds.editSlicesBitwig";
+pub const SLICES: &str = "sounds.editSlices";
+pub const TO_BITWIG: &str = "sounds.editSlicesBitwig";
 
 /// How many pads the strip's foot names before it skips to the last.
 const PADS_NAMED: usize = 8;
@@ -42,6 +42,12 @@ const ON_BEATS: [(&str, f64); 4] =
 const TO_NEXT_HIT: &str = "to its next hit";
 const TO_NEXT_CUT: &str = "to the next cut";
 const TO_END: &str = "to the sound's end";
+
+/// What the Send button says until there are slices to count.
+const SEND: &str = "Send the slices";
+
+/// What the Send menu's folder line says until there are slices to count.
+const TO_FOLDER: &str = "A numbered folder";
 
 /// What the cuts go by.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -187,11 +193,96 @@ enum On {
 
 /// Where slices go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum To {
+pub enum To {
     /// On a Drum Machine in Bitwig, one to a pad from C1.
     Bitwig,
     /// Just their folder, numbered.
     Folder,
+}
+
+/// Slices for the strip's host to send ([`Host::send`]): what [`edit_copy::slices_to_keep`] makes their files from.
+pub struct Slices {
+    /// The sound they're of, by its id in the host's list.
+    pub id: i64,
+    /// What the strip read of it, and when its file was last changed as it was read.
+    pub source: Source,
+    pub changed: Option<SystemTime>,
+    /// The edit they're cut from, as it sounds.
+    pub audio: Arc<AudioData>,
+    /// What that edit is of what was read, in words that are others for other edits: with the cuts, it names the
+    /// slices' folder.
+    pub what: String,
+    /// Each slice, in frames of `audio`.
+    pub spans: Vec<Span>,
+    /// The sound's name, for the words about them.
+    pub name: String,
+}
+
+/// A cut on the Slices' waveform: where (0 to 1 across the part on show), the number of the slice it starts, and how
+/// much room there is to the next line (0 to 1 across), for its number.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Cut {
+    pub at: f32,
+    pub number: usize,
+    pub room: f32,
+}
+
+/// The Slices as the strip shows them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Showing {
+    /// On: the edit's tools give way to the slicing's.
+    pub on: bool,
+    /// The cuts on show, the slice picked (0 to 1 across; none unless `slice_to` is past `slice_from`), and where the
+    /// first cut is (what's before it is in no slice).
+    pub cuts: Vec<Cut>,
+    pub slice_from: f32,
+    pub slice_to: f32,
+    pub first_cut: f32,
+    /// What the cuts go by ("Hits (20)", "Every beat"…) and the choices; whether it's the hits (the sensitivity then
+    /// counts); how big a hit must be, 0 (only the biggest) to 1 (the smallest too); and how far each slice runs.
+    pub cut_at: String,
+    pub cut_at_choices: Vec<String>,
+    pub cut_at_hits: bool,
+    pub sensitivity: f32,
+    pub each: String,
+    pub each_choices: Vec<String>,
+    /// The Send button's words ("Send 20 slices") and whether there's anything to send (and none on their way); each
+    /// slice's pad, by its note's name as Bitwig has it ("C1", "C#1"…), for its menu; what the menu's folder line says
+    /// ("A numbered folder, 01 … 20"), and where the slices are saved.
+    pub send_text: String,
+    pub can_send: bool,
+    pub pads: Vec<String>,
+    pub to_folder_text: String,
+    pub saved_in: String,
+    /// A number that's another whenever the lines the mouse can take hold of are others (where the cuts are, and the
+    /// stretch of the sound that's shown): what [`near`] says is asked again then, though the mouse hasn't moved.
+    pub cuts_mark: i32,
+}
+
+impl Default for Showing {
+    /// The Slices off.
+    fn default() -> Self {
+        let usual = Slicing::default();
+        Showing {
+            on: false,
+            cuts: Vec::new(),
+            slice_from: 0.0,
+            slice_to: 0.0,
+            first_cut: 0.0,
+            cut_at: String::new(),
+            cut_at_choices: Vec::new(),
+            cut_at_hits: usual.cut_at == CutAt::Hits,
+            sensitivity: usual.sensitivity,
+            each: String::new(),
+            each_choices: Vec::new(),
+            send_text: SEND.to_owned(),
+            can_send: false,
+            pads: Vec::new(),
+            to_folder_text: TO_FOLDER.to_owned(),
+            saved_in: String::new(),
+            cuts_mark: 0,
+        }
+    }
 }
 
 /// Where the cuts of the edit `made` go by `cut_at` (the hits, as small as `sensitivity` takes; or the beats at
@@ -250,10 +341,8 @@ pub(super) fn edit_made(o: &mut Opened) {
 }
 
 /// The scissors: turns the sound's Slices on, or off again (its cuts wait until they're back on). Whether it did.
-pub(super) fn toggle(app: &AppWindow) -> bool {
-    let done = STRIP.with(|s| {
-        let mut s = s.borrow_mut();
-        let Some(o) = s.sound.as_mut() else { return false };
+pub(super) fn toggle(host: &dyn Host) -> bool {
+    let done = host.strip().borrow_mut().sound.as_mut().is_some_and(|o| {
         let sliced = o.sliced.get_or_insert_with(Sliced::default);
         sliced.history.end_live();
         sliced.on = !sliced.on;
@@ -264,7 +353,7 @@ pub(super) fn toggle(app: &AppWindow) -> bool {
         true
     });
     if done {
-        super::show(app);
+        show(host);
     }
     done
 }
@@ -282,10 +371,8 @@ pub(super) fn escape(o: &mut Opened) -> bool {
 }
 
 /// Undo (`back`) or redo of the cuts.
-pub(super) fn step(app: &AppWindow, back: bool) -> bool {
-    let stepped = STRIP.with(|s| {
-        let mut s = s.borrow_mut();
-        let Some(o) = s.sound.as_mut() else { return false };
+pub(super) fn step(host: &dyn Host, back: bool) -> bool {
+    let stepped = host.strip().borrow_mut().sound.as_mut().is_some_and(|o| {
         let Some(sliced) = o.sliced.as_mut().filter(|s| s.on) else { return false };
         let stepped = if back { sliced.history.undo() } else { sliced.history.redo() };
         if stepped {
@@ -295,17 +382,15 @@ pub(super) fn step(app: &AppWindow, back: bool) -> bool {
         stepped
     });
     if stepped {
-        super::show(app);
+        show(host);
     }
     stepped
 }
 
 /// Makes the slicing on show what `next` makes of it (given the edit, and the sound's tempo): a step for undo, or for
 /// `live` part of a drag's (a slider on its way), which is one step once it ends ([`end_live`]). Whether it changed.
-fn change(app: &AppWindow, live: bool, next: impl FnOnce(&Slicing, &Made, Option<f64>) -> Slicing) -> bool {
-    let changed = STRIP.with(|s| {
-        let mut s = s.borrow_mut();
-        let Some(o) = s.sound.as_mut() else { return false };
+fn change(host: &dyn Host, live: bool, next: impl FnOnce(&Slicing, &Made, Option<f64>) -> Slicing) -> bool {
+    let changed = host.strip().borrow_mut().sound.as_mut().is_some_and(|o| {
         let Some((slicing, made)) = now(o) else { return false };
         let next = next(slicing, made, o.bpm);
         if next == *slicing {
@@ -325,24 +410,22 @@ fn change(app: &AppWindow, live: bool, next: impl FnOnce(&Slicing, &Made, Option
         true
     });
     if changed {
-        super::show(app);
+        show(host);
     }
     changed
 }
 
-/// A drag that changed the slicing as it went is over: it's one step for undo.
-fn end_live(app: &AppWindow) {
-    STRIP.with(|s| {
-        if let Some(sliced) = s.borrow_mut().sound.as_mut().and_then(|o| o.sliced.as_mut()) {
-            sliced.history.end_live();
-        }
-    });
-    super::show(app);
+/// A drag that changed the slicing as it went is over (the Sensitivity slider let go): it's one step for undo.
+pub fn end_live(host: &dyn Host) {
+    if let Some(sliced) = host.strip().borrow_mut().sound.as_mut().and_then(|o| o.sliced.as_mut()) {
+        sliced.history.end_live();
+    }
+    show(host);
 }
 
 /// "Cut at" picked from its menu, by its line's words: the cuts go where that puts them (the same one again puts
 /// them back there, after lines moved by hand).
-fn cut_at_picked(app: &AppWindow, choice: &str) {
+pub fn cut_at_picked(host: &dyn Host, choice: &str) {
     let cut_at = if choice.starts_with(HITS) {
         CutAt::Hits
     } else if let Some((_, beats)) = ON_BEATS.iter().find(|(name, _)| *name == choice) {
@@ -350,7 +433,7 @@ fn cut_at_picked(app: &AppWindow, choice: &str) {
     } else {
         return;
     };
-    change(app, false, |slicing, made, bpm| Slicing {
+    change(host, false, |slicing, made, bpm| Slicing {
         cut_at,
         cuts: cuts_for(made, bpm, cut_at, slicing.sensitivity),
         ..slicing.clone()
@@ -358,9 +441,9 @@ fn cut_at_picked(app: &AppWindow, choice: &str) {
 }
 
 /// The Sensitivity slider at `to` (0 to 1), on its way: the cuts are at the hits that big.
-fn sensitivity_moved(app: &AppWindow, to: f32) {
+pub fn sensitivity_moved(host: &dyn Host, to: f32) {
     let to = if to.is_finite() { to.clamp(0.0, 1.0) } else { 0.5 };
-    change(app, true, |slicing, made, bpm| Slicing {
+    change(host, true, |slicing, made, bpm| Slicing {
         sensitivity: to,
         cuts: cuts_for(made, bpm, slicing.cut_at, to),
         ..slicing.clone()
@@ -368,9 +451,9 @@ fn sensitivity_moved(app: &AppWindow, to: f32) {
 }
 
 /// "Each slice" picked from its menu: to the next cut, or to the sound's end.
-fn each_picked(app: &AppWindow, choice: &str) {
+pub fn each_picked(host: &dyn Host, choice: &str) {
     let to_end = choice == TO_END;
-    change(app, false, |slicing, _, _| Slicing { to_end, ..slicing.clone() });
+    change(host, false, |slicing, _, _| Slicing { to_end, ..slicing.clone() });
 }
 
 /// A press on the Slices' waveform of the sound `o`, `at` (0 to 1 across what's shown): on a line no further off
@@ -389,12 +472,12 @@ fn press(o: &mut Opened, at: f64, within: f64, shift: bool) {
     o.slice_press = Some(Press { at, within, shift, on });
 }
 
-fn down(at: f64, within: f64, shift: bool) {
-    STRIP.with(|s| {
-        if let Some(o) = s.borrow_mut().sound.as_mut() {
-            press(o, at, within, shift);
-        }
-    });
+/// A press on the Slices' waveform, `at` (0 to 1 across what's shown), a line within `within` of it taken hold of;
+/// `shift` for no snapping to the hits.
+pub fn down(strip: &mut Strip, at: f64, within: f64, shift: bool) {
+    if let Some(o) = strip.sound.as_mut() {
+        press(o, at, within, shift);
+    }
 }
 
 /// What the mouse moving with the button down came to.
@@ -424,7 +507,7 @@ fn drag(o: &mut Opened, at: f64, shift: bool, far: bool) -> Dragged {
                 at
             } else {
                 let hits: Vec<f64> = made.all_hits.iter().map(|(hit, _)| *hit).collect();
-                part::snap_to(&hits, at, within * SNAP_OVER_HOLD)
+                sound_part::snap_to(&hits, at, within * SNAP_OVER_HOLD)
             };
             let next = slicing.moved(cut, at, seconds);
             if let Some(press) = o.slice_press.as_mut() {
@@ -446,14 +529,16 @@ fn drag(o: &mut Opened, at: f64, shift: bool, far: bool) -> Dragged {
     }
 }
 
-fn moved(app: &AppWindow, at: f64, shift: bool, far: bool) {
-    let dragged = STRIP.with(|s| s.borrow_mut().sound.as_mut().map_or(Dragged::Nothing, |o| drag(o, at, shift, far)));
+/// The mouse moved with the button down, to `at` (0 to 1 across what's shown); `shift` for no snapping to the hits,
+/// `far` once it has gone too far from the press to be a click.
+pub fn moved(host: &dyn Host, at: f64, shift: bool, far: bool) {
+    let dragged = host.strip().borrow_mut().sound.as_mut().map_or(Dragged::Nothing, |o| drag(o, at, shift, far));
     match dragged {
         Dragged::Nothing => {}
-        Dragged::Line => super::show(app),
+        Dragged::Line => show(host),
         Dragged::Carry(span) => {
-            super::show(app);
-            carry(app, Some(span));
+            show(host);
+            carry(host, Some(span));
         }
     }
 }
@@ -490,29 +575,28 @@ fn release(o: &mut Opened, cut_short: bool) -> Released {
     }
 }
 
-fn up(app: &AppWindow, cut_short: bool) {
-    let released = STRIP.with(|s| s.borrow_mut().sound.as_mut().map_or(Released::Nothing, |o| release(o, cut_short)));
+/// The button came up (`cut_short`: the window lost the mouse).
+pub fn up(host: &dyn Host, cut_short: bool) {
+    let released = host.strip().borrow_mut().sound.as_mut().map_or(Released::Nothing, |o| release(o, cut_short));
     match released {
         Released::Nothing => {}
-        Released::Line => super::show(app),
-        Released::Play(slice) => play(app, slice),
-        Released::LetGo => crate::drag::let_go(app),
+        Released::Line => show(host),
+        Released::Play(slice) => play(host, slice),
+        Released::LetGo => host.let_go(),
     }
 }
 
 /// Picks the slice `slice` (from 0) and plays it.
-fn play(app: &AppWindow, slice: usize) {
-    let span = STRIP.with(|s| {
-        let mut s = s.borrow_mut();
-        let o = s.sound.as_mut()?;
+fn play(host: &dyn Host, slice: usize) {
+    let span = host.strip().borrow_mut().sound.as_mut().and_then(|o| {
         let (slicing, made) = now(o)?;
         let span = slicing.slice(slice, made.audio.seconds())?;
         o.slice = Some(slice);
         Some(span)
     });
     let Some((from, till)) = span else { return };
-    super::show(app);
-    play_edit(app, from, Some(till));
+    show(host);
+    play_edit(host, from, Some(till));
 }
 
 /// A double-click on the sound `o`, where the press was: on a line, the line goes; elsewhere, there's a cut there
@@ -535,7 +619,7 @@ fn double_click(o: &mut Opened) -> bool {
                 at
             } else {
                 let hits: Vec<f64> = made.all_hits.iter().map(|(hit, _)| *hit).collect();
-                part::snap_to(&hits, at, within * SNAP_OVER_HOLD)
+                sound_part::snap_to(&hits, at, within * SNAP_OVER_HOLD)
             };
             slicing.with_cut(at, made.audio.seconds())
         }
@@ -550,186 +634,68 @@ fn double_click(o: &mut Opened) -> bool {
     true
 }
 
-fn double(app: &AppWindow) {
-    if !STRIP.with(|s| s.borrow_mut().sound.as_mut().is_some_and(double_click)) {
+/// A double-click on the Slices' waveform, where the press was.
+pub fn double(host: &dyn Host) {
+    let changed = host.strip().borrow_mut().sound.as_mut().is_some_and(double_click);
+    if !changed {
         return;
     }
     // The first of the two clicks played a slice that's another now.
-    if PAGE.with(|p| p.borrow().play_edit) {
-        super::super::stop(app);
-    }
-    super::show(app);
+    stop(host);
+    show(host);
 }
 
 /// Whether a cut's line is within `within` of `at` (0 to 1 across what's shown): the mouse there takes hold of it.
-fn near(at: f64, within: f64) -> bool {
-    STRIP.with(|s| {
-        let s = s.borrow();
-        let Some(o) = s.sound.as_ref() else { return false };
-        let Some((slicing, _)) = now(o) else { return false };
-        let (from, to) = view(o);
-        let long = (to - from).max(1e-9);
-        slicing.cut_near(from + at.clamp(0.0, 1.0) * long, within.max(0.0) * long).is_some()
-    })
+pub fn near(strip: &Strip, at: f64, within: f64) -> bool {
+    let Some(o) = strip.sound.as_ref() else { return false };
+    let Some((slicing, _)) = now(o) else { return false };
+    let (from, to) = view(o);
+    let long = (to - from).max(1e-9);
+    slicing.cut_near(from + at.clamp(0.0, 1.0) * long, within.max(0.0) * long).is_some()
 }
 
-/// Sends the slices: each a file of its own, saved in a folder for this slicing in Edited sounds (made now, or the
-/// ones made before), then put on a Drum Machine in Bitwig, or their folder opened. On a thread of its own; a card
-/// says how it went, and Send waits until it's done. Whether there were slices to send.
-pub(super) fn send(app: &AppWindow, to: To) -> bool {
-    let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return false };
-    let here = HERE.with(|h| *h.borrow());
-    let ready = STRIP.with(|s| {
-        let mut s = s.borrow_mut();
-        let s = &mut *s;
-        if s.sending {
-            return None;
-        }
-        let o = s.sound.as_ref()?;
-        let (slicing, made) = now(o)?;
-        let rate = f64::from(made.audio.sample_rate.max(1));
-        let cuts: Vec<usize> = slicing.cuts.iter().map(|c| (c * rate).round() as usize).collect();
-        let spans = edit_copy::slice_spans(&cuts, made.audio.len(), slicing.to_end);
-        if spans.is_empty() {
-            return None;
-        }
-        // The screenshots: nothing is written and nothing is sent.
-        s.sending = !here;
-        Some((
-            o.id,
-            o.source.clone(),
-            made.audio.clone(),
-            o.changed,
-            format!("{:?}", made.edits),
-            spans,
-            o.name.clone(),
-        ))
-    });
-    let Some((id, source, audio, changed, what, spans, name)) = ready else { return false };
-    if here {
-        return true;
-    }
-    let slices = to_bitwig::slices_text(spans.len());
-    let job = match to {
-        To::Bitwig => to_bitwig::slices_card(&feed, &name, spans.len()),
-        To::Folder => feed.start(&format!("Saving {slices} of {name}"), ""),
+/// Each slice of the edit `made` as `slicing` cuts it, in frames.
+fn spans(slicing: &Slicing, made: &Made) -> Vec<Span> {
+    let rate = f64::from(made.audio.sample_rate.max(1));
+    let cuts: Vec<usize> = slicing.cuts.iter().map(|c| (c * rate).round() as usize).collect();
+    edit_copy::slice_spans(&cuts, made.audio.len(), slicing.to_end)
+}
+
+/// Sends the slices: the host puts each in a file of its own, saved in a folder for this slicing in Edited sounds
+/// (made now, or the ones made before), then on a Drum Machine in Bitwig, or opens their folder; Send waits until
+/// they're there ([`sent`]). Whether there were slices to send.
+pub(super) fn send(host: &dyn Host, to: To) -> bool {
+    let ready = {
+        let s = host.strip().borrow();
+        s.sound.as_ref().filter(|_| !s.sending).and_then(|o| {
+            let (slicing, made) = now(o)?;
+            let spans = spans(slicing, made);
+            if spans.is_empty() {
+                return None;
+            }
+            Some(Slices {
+                id: o.id,
+                source: o.source.clone(),
+                changed: o.changed,
+                audio: made.audio.clone(),
+                what: format!("{:?}", made.edits),
+                spans,
+                name: o.name.clone(),
+            })
+        })
     };
-    super::show(app);
-    let setting = PAGE.with(|p| p.borrow().kit.drum_machine.clone());
-    let weak = app.as_weak();
-    let started = background::spawn("Slices", move || {
-        background::lower_priority();
-        let saved = mo_catch::catch_crash(AssertUnwindSafe(|| {
-            edit_copy::slices_to_keep(&source, &audio, changed, &what, &spans)
-        }))
-        .unwrap_or_else(|_| Err("Something went wrong: the log says what.".to_owned()));
-        let went_in = match (saved, to) {
-            (Err(why), _) => {
-                log::warning("Sounds", &format!("Couldn't make the slices of {name}: {why}"));
-                job.failed(&why);
-                false
-            }
-            (Ok(files), To::Folder) => {
-                let folder = files.first().and_then(|f| f.parent()).map(std::path::Path::to_path_buf);
-                let named = folder
-                    .as_ref()
-                    .and_then(|f| f.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                log::info("Sounds", &format!("Saved {slices} of {name} in {named}"));
-                job.done_as(&format!("Saved {slices} of {name}"), &format!("{named}, in {}", edit_copy::FOLDER));
-                if let Some(folder) = folder {
-                    crate::files::open_folder(&feed, &folder.to_string_lossy());
-                }
-                false
-            }
-            // A panic in it is logged as a crash and fails the card as it goes; Send still comes back.
-            (Ok(files), To::Bitwig) => mo_catch::catch_crash(AssertUnwindSafe(|| {
-                to_bitwig::slices_made(&job);
-                let pads = to_bitwig::slice_pads(&files);
-                let bitwig = to_bitwig::Bitwig::default();
-                to_bitwig::send_slices(job, &bitwig, &kit::KITS_TO_BITWIG, &name, &pads, setting.as_deref())
-            }))
-            .unwrap_or(false),
-        };
-        let _ = slint::invoke_from_event_loop(move || {
-            STRIP.with(|s| s.borrow_mut().sending = false);
-            if let Some(app) = weak.upgrade() {
-                super::show(&app);
-                // Its slices went into Bitwig: that counts towards how liked the sound is, as a send of it does.
-                if went_in {
-                    did::sent(&app, &[id]);
-                }
-            }
-        });
-    });
-    // Its card was taken into the thread, so it fails by itself.
-    if let Err(e) = started {
-        log::error("Sounds", &format!("Couldn't start sending the slices: {e}"));
-        STRIP.with(|s| s.borrow_mut().sending = false);
-        super::show(app);
+    let Some(slices) = ready else { return false };
+    if host.send(to, slices) {
+        host.strip().borrow_mut().sending = true;
+        show(host);
     }
     true
 }
 
-pub(super) fn wire(app: &AppWindow) {
-    let data = app.global::<SoundEdit>();
-    let weak = app.as_weak();
-    data.on_cut_at_picked(move |choice| {
-        if let Some(app) = weak.upgrade() {
-            cut_at_picked(&app, &choice);
-        }
-    });
-    let weak = app.as_weak();
-    data.on_sensitivity_moved(move |to| {
-        if let Some(app) = weak.upgrade() {
-            sensitivity_moved(&app, to);
-        }
-    });
-    let weak = app.as_weak();
-    data.on_sensitivity_released(move |_| {
-        if let Some(app) = weak.upgrade() {
-            end_live(&app);
-        }
-    });
-    let weak = app.as_weak();
-    data.on_each_picked(move |choice| {
-        if let Some(app) = weak.upgrade() {
-            each_picked(&app, &choice);
-        }
-    });
-    data.on_slice_down(|at, within, shift| down(f64::from(at), f64::from(within), shift));
-    let weak = app.as_weak();
-    data.on_slice_move(move |at, shift, far| {
-        if let Some(app) = weak.upgrade() {
-            moved(&app, f64::from(at), shift, far);
-        }
-    });
-    let weak = app.as_weak();
-    data.on_slice_up(move |cut_short| {
-        if let Some(app) = weak.upgrade() {
-            up(&app, cut_short);
-        }
-    });
-    let weak = app.as_weak();
-    data.on_slice_double(move || {
-        if let Some(app) = weak.upgrade() {
-            double(&app);
-        }
-    });
-    data.on_slice_near(|at, within, _| near(f64::from(at), f64::from(within)));
-}
-
-/// The strip with no Slices on show.
-pub(super) fn show_none(data: &SoundEdit) {
-    data.set_slicing(false);
-    data.set_cuts(ModelRc::default());
-    data.set_pads(ModelRc::default());
-    data.set_slice_from(0.0);
-    data.set_slice_to(0.0);
-    data.set_first_cut(0.0);
-    data.set_cuts_mark(0);
-    data.set_can_send(false);
+/// The slices handed to the host ([`Host::send`]) are where they were sent, or couldn't be: Send comes back.
+pub fn sent(host: &dyn Host) {
+    host.strip().borrow_mut().sending = false;
+    show(host);
 }
 
 /// A number that's another whenever the lines the mouse can take hold of are others: where the cuts are, and the
@@ -744,16 +710,10 @@ fn cuts_mark(cuts: &[f64], from: f64, to: f64) -> i32 {
 }
 
 /// The Slices of the sound `o` as they are now (`sending`: slices are on their way, so Send waits).
-pub(super) fn show(data: &SoundEdit, o: &Opened, sending: bool) {
-    let Some(sliced) = o.sliced.as_ref().filter(|s| s.on) else {
-        show_none(data);
-        return;
-    };
+pub(super) fn showing(o: &Opened, sending: bool) -> Showing {
+    let Some(sliced) = o.sliced.as_ref().filter(|s| s.on) else { return Showing::default() };
     let slicing = &sliced.history.now;
     let ready = now(o);
-    data.set_slicing(true);
-    data.set_sensitivity(slicing.sensitivity);
-    data.set_cut_at_hits(slicing.cut_at == CutAt::Hits);
     // What the cuts go by: the hits, with how many cuts they give; or the beats, for a sound whose tempo is known.
     let at_hits = match (slicing.cut_at, ready) {
         (CutAt::Hits, _) => slicing.cuts.len(),
@@ -765,76 +725,60 @@ pub(super) fn show(data: &SoundEdit, o: &Opened, sending: bool) {
         CutAt::Hits => hits_line.clone(),
         CutAt::Beats(beats) => ON_BEATS.iter().find(|(_, b)| *b == beats).map_or(HITS, |(name, _)| *name).to_owned(),
     };
-    let mut choices: Vec<SharedString> = vec![hits_line.into()];
+    let mut cut_at_choices = vec![hits_line];
     if o.bpm.is_some() {
-        choices.extend(ON_BEATS.iter().map(|(name, _)| SharedString::from(*name)));
+        cut_at_choices.extend(ON_BEATS.iter().map(|(name, _)| (*name).to_owned()));
     }
-    data.set_cut_at(cut_at.into());
-    data.set_cut_at_choices(ModelRc::new(VecModel::from(choices)));
     let to_next = if slicing.cut_at == CutAt::Hits { TO_NEXT_HIT } else { TO_NEXT_CUT };
-    data.set_each(if slicing.to_end { TO_END } else { to_next }.into());
-    data.set_each_choices(ModelRc::new(VecModel::from(vec![SharedString::from(to_next), SharedString::from(TO_END)])));
-    // Not sliced yet (the edit is still being made): no cuts to show or send.
-    let Some((_, made)) = ready else {
-        data.set_cuts(ModelRc::default());
-        data.set_pads(ModelRc::default());
-        data.set_slice_from(0.0);
-        data.set_slice_to(0.0);
-        data.set_first_cut(0.0);
-        data.set_cuts_mark(0);
-        data.set_can_send(false);
-        data.set_send_text("Send the slices".into());
-        return;
+    let mut show = Showing {
+        on: true,
+        cut_at,
+        cut_at_choices,
+        cut_at_hits: slicing.cut_at == CutAt::Hits,
+        sensitivity: slicing.sensitivity,
+        each: if slicing.to_end { TO_END } else { to_next }.to_owned(),
+        each_choices: vec![to_next.to_owned(), TO_END.to_owned()],
+        ..Showing::default()
     };
+    // Not sliced yet (the edit is still being made): no cuts to show or send.
+    let Some((_, made)) = ready else { return show };
     let (from, to) = view(o);
-    data.set_cuts_mark(cuts_mark(&slicing.cuts, from, to));
+    show.cuts_mark = cuts_mark(&slicing.cuts, from, to);
     let long = (to - from).max(1e-9);
     let across = |t: f64| ((t - from) / long) as f32;
     // The cuts in sight, each with the room to the next line (its number shows where there's room for it).
     let shown: Vec<(usize, f64)> =
         slicing.cuts.iter().copied().enumerate().filter(|(_, cut)| *cut >= from && *cut <= to).collect();
-    let cuts: Vec<SliceCut> = shown
+    show.cuts = shown
         .iter()
         .enumerate()
         .map(|(k, &(i, cut))| {
             let next = shown.get(k + 1).map_or(to, |&(_, next)| next);
-            SliceCut {
-                at: across(cut),
-                number: i32::try_from(i + 1).unwrap_or(i32::MAX),
-                room: across(next) - across(cut),
-            }
+            Cut { at: across(cut), number: i + 1, room: across(next) - across(cut) }
         })
         .collect();
-    data.set_cuts(ModelRc::new(VecModel::from(cuts)));
-    data.set_first_cut(slicing.cuts.first().map_or(0.0, |first| across(*first).clamp(0.0, 1.0)));
-    let (slice_from, slice_to) =
+    show.first_cut = slicing.cuts.first().map_or(0.0, |first| across(*first).clamp(0.0, 1.0));
+    (show.slice_from, show.slice_to) =
         picked(o).map_or((0.0, 0.0), |(a, b)| (across(a).clamp(0.0, 1.0), across(b).clamp(0.0, 1.0)));
-    data.set_slice_from(slice_from);
-    data.set_slice_to(slice_to);
     let slices = slicing.cuts.len();
-    let pads: Vec<SharedString> = (0..slices).map(|i| to_bitwig::slice_pad_name(i).into()).collect();
-    data.set_pads(ModelRc::new(VecModel::from(pads)));
-    data.set_can_send(slices > 0 && !sending);
-    data.set_send_text(format!("Send {}", to_bitwig::slices_text(slices)).into());
-    data.set_to_folder_text(
-        if slices > 1 { format!("A numbered folder, 01 \u{2026} {slices:02}") } else { "A numbered folder".to_owned() }
-            .into(),
-    );
+    show.pads = (0..slices).map(to_bitwig::slice_pad_name).collect();
+    show.can_send = slices > 0 && !sending;
+    show.send_text = format!("Send {}", to_bitwig::slices_text(slices));
+    show.to_folder_text =
+        if slices > 1 { format!("{TO_FOLDER}, 01 \u{2026} {slices:02}") } else { TO_FOLDER.to_owned() };
     // Where they're saved: the folder this slicing has, by its name.
-    let rate = f64::from(made.audio.sample_rate.max(1));
-    let frames: Vec<usize> = slicing.cuts.iter().map(|c| (c * rate).round() as usize).collect();
-    let spans = edit_copy::slice_spans(&frames, made.audio.len(), slicing.to_end);
-    let folder = edit_copy::slices_folder_name(&o.source, &format!("{:?}", made.edits), &spans);
-    data.set_saved_in(format!("Saved in {}: {folder}", edit_copy::FOLDER).into());
+    let folder = edit_copy::slices_folder_name(&o.source, &format!("{:?}", made.edits), &spans(slicing, made));
+    show.saved_in = format!("Saved in {}: {folder}", edit_copy::FOLDER);
+    show
 }
 
 /// The pads as chips along the strip's foot: "1 → C1", "2 → C#1"…, the first few and then the last; the picked
 /// slice's is lit.
-pub(super) fn pad_chips(o: &Opened) -> Vec<EditChip> {
+pub(super) fn pad_chips(o: &Opened) -> Vec<Chip> {
     let slices = now(o).map_or(0, |(slicing, _)| slicing.cuts.len());
     let pad = |i: usize| format!("{} \u{2192} {}", i + 1, to_bitwig::slice_pad_name(i));
-    let mut chips: Vec<EditChip> =
-        (0..slices.min(PADS_NAMED)).map(|i| EditChip { text: pad(i).into(), last: o.slice == Some(i) }).collect();
+    let mut chips: Vec<Chip> =
+        (0..slices.min(PADS_NAMED)).map(|i| Chip { text: pad(i), last: o.slice == Some(i) }).collect();
     if slices > PADS_NAMED {
         let last = slices - 1;
         let lit = o.slice.is_some_and(|picked| picked >= PADS_NAMED);
@@ -843,7 +787,7 @@ pub(super) fn pad_chips(o: &Opened) -> Vec<EditChip> {
             Some(picked) if picked < last => format!("\u{2026} {} \u{2026} {}", pad(picked), pad(last)),
             _ => format!("\u{2026} {}", pad(last)),
         };
-        chips.push(EditChip { text: text.into(), last: lit });
+        chips.push(Chip { text, last: lit });
     }
     chips
 }
@@ -851,10 +795,10 @@ pub(super) fn pad_chips(o: &Opened) -> Vec<EditChip> {
 /// The strip's heading with the Slices on: "20 slices · 2 bars", and the slice picked ("· slice 5 is 0.23 s"). How
 /// long the sound is, until it's sliced.
 pub(super) fn heading(o: &Opened, seconds: f64) -> String {
-    let Some((slicing, _)) = now(o) else { return part::length_text(seconds) };
+    let Some((slicing, _)) = now(o) else { return sound_part::length_text(seconds) };
     let mut text = format!("{} \u{b7} {}", to_bitwig::slices_text(slicing.cuts.len()), length_words(seconds, o.bpm));
     if let (Some(slice), Some((from, till))) = (o.slice, picked(o)) {
-        let _ = write!(text, " \u{b7} slice {} is {}", slice + 1, part::length_text(till - from));
+        let _ = write!(text, " \u{b7} slice {} is {}", slice + 1, sound_part::length_text(till - from));
     }
     text
 }
@@ -869,25 +813,18 @@ fn length_words(seconds: f64, bpm: Option<f64>) -> String {
             return format!("{whole} bar{}", if whole == 1.0 { "" } else { "s" });
         }
     }
-    part::length_text(seconds)
+    sound_part::length_text(seconds)
 }
 
 /// For the screenshots: how many cuts the sound's Slices have (none with them off), and the slice picked.
-pub fn state_for_screens() -> (usize, Option<usize>) {
-    STRIP.with(|s| {
-        let s = s.borrow();
-        let Some(o) = s.sound.as_ref() else { return (0, None) };
-        (now(o).map_or(0, |(slicing, _)| slicing.cuts.len()), o.slice)
-    })
+pub fn state_for_screens(strip: &Strip) -> (usize, Option<usize>) {
+    let Some(o) = strip.sound.as_ref() else { return (0, None) };
+    (now(o).map_or(0, |(slicing, _)| slicing.cuts.len()), o.slice)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use mo_audio::AudioData;
-
-    use super::super::{Edits, Source, Strip, make, stash};
+    use super::super::{Edits, make, stash};
     use super::*;
 
     fn slicing(cuts: &[f64]) -> Slicing {
@@ -1205,7 +1142,7 @@ mod tests {
         slices_on(&mut o);
         let twenty = Slicing { cuts: (0..20).map(|i| f64::from(i) * 0.1).collect(), ..Slicing::default() };
         o.sliced.as_mut().unwrap().history.change(twenty);
-        let texts = |o: &Opened| pad_chips(o).iter().map(|c| c.text.to_string()).collect::<Vec<_>>();
+        let texts = |o: &Opened| pad_chips(o).iter().map(|c| c.text.clone()).collect::<Vec<_>>();
         let lit = |o: &Opened| pad_chips(o).iter().position(|c| c.last);
         let chips = texts(&o);
         assert_eq!(chips.len(), PADS_NAMED + 1);

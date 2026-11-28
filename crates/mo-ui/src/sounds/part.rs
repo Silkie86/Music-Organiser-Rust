@@ -9,11 +9,11 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use mo_app::background::Newest;
+use mo_app::sound_part::{length_text, marks, snap_to};
 use mo_app::{edit_copy, log};
 use mo_audio::hits::USUAL_RISE_DB;
 use slint::{ComponentHandle, SharedString};
@@ -158,37 +158,6 @@ fn show(app: &AppWindow) {
     data.set_part_hits(hits.map_or_else(SharedString::new, |h| marks(&h).into()));
 }
 
-/// How long a part lasts, as the card's handle says it: "0.47 s", "12.3 s", "1:05". Rounded before the way it's
-/// written is chosen, so 9.996 s reads "10.0 s" and 59.96 s "1:00".
-pub(super) fn length_text(seconds: f64) -> String {
-    let hundredths = (seconds * 100.0).round() / 100.0;
-    let tenths = (seconds * 10.0).round() / 10.0;
-    if tenths >= 60.0 {
-        let whole = seconds.round() as u64;
-        format!("{}:{:02}", whole / 60, whole % 60)
-    } else if hundredths >= 10.0 {
-        format!("{tenths:.1} s")
-    } else {
-        format!("{hundredths:.2} s")
-    }
-}
-
-/// The hits at `at` (0 to 1) as short lines along a waveform's foot, a path 1000 across and 10 high. Hits closer than
-/// a few tenths of a percent of the width to the last one shown are left out: on the card they'd be one mark.
-pub(super) fn marks(at: &[f64]) -> String {
-    let mut path = String::new();
-    let mut last = f64::NEG_INFINITY;
-    for &a in at {
-        let x = a * 1000.0;
-        if x - last < 4.0 {
-            continue;
-        }
-        last = x;
-        let _ = write!(path, "M {x:.1} 10 L {x:.1} 0 ");
-    }
-    path
-}
-
 /// `s`'s hits, once found.
 fn kept(id: i64) -> Option<Arc<[f64]>> {
     KEPT.with(|k| k.borrow().iter().find(|(i, _)| *i == id).map(|(_, at)| Arc::clone(at)))
@@ -211,18 +180,6 @@ fn keep(id: i64, at: Arc<[f64]>) {
 fn snap(at: f32, within: f32) -> f32 {
     let Some(hits) = picked().and_then(|(id, _)| kept(id)) else { return at };
     snap_to(&hits, f64::from(at), f64::from(within)) as f32
-}
-
-/// [`snap`]'s work, on hits `at` (0 to 1, in order).
-pub(super) fn snap_to(hits: &[f64], at: f64, within: f64) -> f64 {
-    if within <= 0.0 || !at.is_finite() {
-        return at;
-    }
-    hits.iter()
-        .copied()
-        .filter(|h| (h - at).abs() <= within)
-        .min_by(|a, b| (a - at).abs().total_cmp(&(b - at).abs()))
-        .unwrap_or(at)
 }
 
 /// Finds the picked sound's hits, unless they're kept or being found, or it's too long to have them
@@ -295,37 +252,5 @@ pub fn hits_for_screens(app: &AppWindow, at: &[f64]) {
     if let Some((id, _)) = picked() {
         keep(id, at.into());
         show(app);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_edge_snaps_to_the_nearest_hit_within_reach_only() {
-        let hits = [0.1, 0.25, 0.3];
-        assert_eq!(snap_to(&hits, 0.27, 0.05), 0.25);
-        assert_eq!(snap_to(&hits, 0.29, 0.05), 0.3);
-        assert_eq!(snap_to(&hits, 0.5, 0.05), 0.5, "none near");
-        assert_eq!(snap_to(&hits, 0.27, 0.0), 0.27, "Shift: no snap");
-        assert_eq!(snap_to(&[], 0.27, 0.05), 0.27);
-    }
-
-    #[test]
-    fn a_parts_length_reads_short() {
-        assert_eq!(length_text(0.46875), "0.47 s");
-        assert_eq!(length_text(12.34), "12.3 s");
-        assert_eq!(length_text(65.2), "1:05");
-        // Rounded first, then written.
-        assert_eq!(length_text(9.996), "10.0 s");
-        assert_eq!(length_text(59.96), "1:00");
-        assert_eq!(length_text(59.94), "59.9 s");
-    }
-
-    #[test]
-    fn marks_close_together_are_one() {
-        assert_eq!(marks(&[0.1, 0.1005, 0.5]), "M 100.0 10 L 100.0 0 M 500.0 10 L 500.0 0 ");
-        assert_eq!(marks(&[]), "");
     }
 }

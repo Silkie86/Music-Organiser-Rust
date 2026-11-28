@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use chrono::NaiveDateTime;
 use mo_app::background::Newest;
 use mo_app::log;
+use mo_app::sound_part::lines;
 use mo_audio::AudioError;
 use mo_sounds::Sound;
 use slint::ComponentHandle;
@@ -175,17 +176,6 @@ fn read(path: &Path, wanted: impl Fn() -> bool) -> Result<Option<Vec<f32>>, Audi
     Ok(Some(lines(&steps, POINTS)))
 }
 
-/// `steps` as `points` lines, each the loudest of its share.
-pub(super) fn lines(steps: &[f32], points: usize) -> Vec<f32> {
-    (0..points)
-        .map(|p| {
-            let from = steps.len() * p / points;
-            let to = (from + 1).max(steps.len() * (p + 1) / points).min(steps.len());
-            steps.get(from..to).unwrap_or_default().iter().copied().fold(0.0, f32::max)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,14 +195,6 @@ mod tests {
         // A newer ask stops it.
         assert!(matches!(read(&path, || false), Ok(None)));
         assert!(read(&dir.join("not-there.wav"), || true).is_err());
-    }
-
-    #[test]
-    fn lines_take_the_loudest_of_their_share() {
-        assert_eq!(lines(&[0.1, 0.5, 0.2, 0.9], 2), vec![0.5, 0.9]);
-        // Fewer steps than lines: each line shows the step under it.
-        assert_eq!(lines(&[0.1, 0.5], 4), vec![0.1, 0.1, 0.5, 0.5]);
-        assert_eq!(lines(&[], 3), vec![0.0; 3]);
     }
 
     #[test]

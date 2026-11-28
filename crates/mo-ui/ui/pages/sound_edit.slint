@@ -3,11 +3,12 @@
 // picked on its waveform, fade it in and out (or drag the fades' corner handles), reverse it, normalise it, turn it up
 // or down, and crossfade a loop. Undo and redo step through the edits; holding O (or the A/B button) plays the
 // original. The edit is dragged out, or saved, as a copy in the export folder's Edited sounds: the file itself never
-// changes (rule 2). Tempo, pitch and Tail wait for the stretcher. The work is in Rust (mo-ui `sounds/edit_strip.rs`).
+// changes (rule 2). Tempo, pitch and Tail wait for the stretcher. The work is in Rust, with no screen, so the plugin
+// can show the same strip (mo-app `edit_strip.rs`; mo-ui `sounds/edit_strip.rs` is the app's side of it).
 //
 // Its Slices (mock-up 9) cut the edit at its hits, or on the beats, for a drum machine's pads: a line at each cut, to
 // drag or double-click away (a double-click between two adds one), a click in a slice to hear it, and Send to put them
-// on a Drum Machine in Bitwig from C1 or in a numbered folder (mo-ui `sounds/edit_strip/slices.rs`).
+// on a Drum Machine in Bitwig from C1 or in a numbered folder (mo-app `edit_strip/slices.rs`).
 
 import { Theme, Type, Space, Heights, Well, Caps, Dot, StudioButton, TempoStepper, DragHandle, InfoTip, Waveform, Icons, Tip, HoverSense, RowSeam, FadeHandle, Widths, MenuChip, StudioSlider, ToggleChip, MenuCard, MenuLine, Groove } from "../studio.slint";
 
